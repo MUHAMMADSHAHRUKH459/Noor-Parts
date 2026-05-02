@@ -47,326 +47,182 @@ interface WindowWithSpeech extends Window {
   webkitSpeechRecognition?: new () => SpeechRecognitionInstance
 }
 
-// ─── Brand Data ──────────────────────────────────────────────────────────────
+// ─── Gemini Parser ────────────────────────────────────────────────────────────
+
+const GEMINI_API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY
+
+const INVENTORY_PROMPT = `You are a parser for a Pakistani mobile parts shop inventory system.
+The shopkeeper speaks in Roman Urdu or English. Extract the following fields from the transcript.
+
+Valid brands: Infinix, Techno, Oppo, Vivo, SparkX, Realme, Redmi, Xiaomi, Google Pixel, iPhone, Samsung, Nokia, Huawei, Itel, Honor, OnePlus
+
+Valid part types: Back Glass, Fingerprint, Power Button, Volume Button, Ribbon, Display, Battery, Speaker, Charging Port, Sim Tray, Camera Lens
+
+Rules:
+- "back glass", "back cover", "peeche ka glass", "bak glass" = Back Glass
+- "fingerprint", "finger", "ungali" = Fingerprint
+- "power button", "power" = Power Button
+- "display", "screen", "lcd", "iskreen" = Display
+- "battery", "bateri" = Battery
+- Numbers followed by "piece", "pcs", "pc" = quantity
+- Numbers after "purchase", "khareed", "liya", "cost" = purchase_price
+- Numbers after "sell", "selling", "becho", "bechna" = selling_price
+- If only two prices mentioned, smaller = purchase_price, larger = selling_price
+
+Return ONLY a JSON object, no explanation, no markdown:
+{"brand":"","model":"","part_type":"","quantity":"","purchase_price":"","selling_price":""}`
+
+const SALE_PROMPT = `You are a parser for a Pakistani mobile parts shop sales system.
+The shopkeeper speaks in Roman Urdu or English. Extract sale information from the transcript.
+
+Valid brands: Infinix, Techno, Oppo, Vivo, SparkX, Realme, Redmi, Xiaomi, Google Pixel, iPhone, Samsung, Nokia, Huawei, Itel, Honor, OnePlus
+
+Valid part types: Back Glass, Fingerprint, Power Button, Volume Button, Ribbon, Display, Battery, Speaker, Charging Port, Sim Tray, Camera Lens
+
+Rules:
+- Combine brand + model + part to make product_name
+- Numbers followed by "piece", "pcs", "pc" = quantity
+- Numbers after "mein", "mai", "rupay", "rs", "becha", "sell" = selling_price
+- If two numbers, smaller likely = quantity, larger = selling_price
+
+Return ONLY a JSON object, no explanation, no markdown:
+{"product_name":"","quantity":"","selling_price":""}`
+
+async function parseWithGemini(
+  transcript: string,
+  mode: 'inventory' | 'sale'
+): Promise<Partial<InventoryVoiceData> | Partial<SaleVoiceData>> {
+  const prompt = mode === 'inventory' ? INVENTORY_PROMPT : SALE_PROMPT
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: `${prompt}\n\nTranscript: "${transcript}"` }] }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 200 }
+      })
+    }
+  )
+
+  if (!response.ok) throw new Error('Gemini API error')
+  const data = await response.json()
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
+  const clean = text.replace(/```json|```/g, '').trim()
+  return JSON.parse(clean)
+}
+
+// ─── Fallback Rule-Based Parser ───────────────────────────────────────────────
 
 const brandMap: Record<string, string> = {
-  'infinix': 'Infinix',
-  'techno': 'Techno',
-  'tecno': 'Techno',
-  'oppo': 'Oppo',
-  'vivo': 'Vivo',
-  'sparkx': 'SparkX',
-  'spark x': 'SparkX',
-  'realme': 'Realme',
-  'redmi': 'Redmi',
-  'xiaomi': 'Xiaomi',
-  'google pixel': 'Google Pixel',
-  'pixel': 'Google Pixel',
-  'iphone': 'iPhone',
-  'apple': 'iPhone',
-  'samsung': 'Samsung',
-  'nokia': 'Nokia',
-  'huawei': 'Huawei',
-  'itel': 'Itel',
-  'honor': 'Honor',
-  'oneplus': 'OnePlus',
-  'one plus': 'OnePlus',
+  'infinix': 'Infinix', 'techno': 'Techno', 'tecno': 'Techno',
+  'oppo': 'Oppo', 'vivo': 'Vivo', 'sparkx': 'SparkX',
+  'realme': 'Realme', 'redmi': 'Redmi', 'xiaomi': 'Xiaomi',
+  'google pixel': 'Google Pixel', 'pixel': 'Google Pixel',
+  'iphone': 'iPhone', 'apple': 'iPhone', 'samsung': 'Samsung',
+  'nokia': 'Nokia', 'huawei': 'Huawei', 'itel': 'Itel',
+  'honor': 'Honor', 'oneplus': 'OnePlus',
 }
 
-// ─── Part Data ───────────────────────────────────────────────────────────────
-
-// Sorted longest-first so multi-word phrases match before single words
 const partMap: Record<string, string> = {
-  'back glass': 'Back Glass',
-  'back cover': 'Back Glass',
-  'bak glass': 'Back Glass',
-  'back panel': 'Back Glass',
-  'peeche ka glass': 'Back Glass',
-  'peechay ka glass': 'Back Glass',
-  'pichla glass': 'Back Glass',
-  'power button': 'Power Button',
-  'volume button': 'Volume Button',
-  'fingerprint': 'Fingerprint',
-  'finger print': 'Fingerprint',
-  'ungali sensor': 'Fingerprint',
-  'ungali': 'Fingerprint',
-  'display': 'Display',
-  'screen': 'Display',
-  'iskreen': 'Display',
-  'lcd': 'Display',
-  'battery': 'Battery',
-  'bateri': 'Battery',
-  'speaker': 'Speaker',
-  'ribbon': 'Ribbon',
-  'flex': 'Ribbon',
-  'charging port': 'Charging Port',
-  'charger port': 'Charging Port',
-  'sim tray': 'Sim Tray',
-  'camera lens': 'Camera Lens',
-  'camera glass': 'Camera Lens',
+  'back glass': 'Back Glass', 'back cover': 'Back Glass', 'bak glass': 'Back Glass',
+  'back panel': 'Back Glass', 'peeche ka glass': 'Back Glass',
+  'power button': 'Power Button', 'fingerprint': 'Fingerprint',
+  'finger print': 'Fingerprint', 'ungali': 'Fingerprint',
+  'display': 'Display', 'screen': 'Display', 'lcd': 'Display',
+  'battery': 'Battery', 'bateri': 'Battery', 'speaker': 'Speaker',
+  'ribbon': 'Ribbon', 'flex': 'Ribbon',
 }
 
-// ─── Parser Helpers ───────────────────────────────────────────────────────────
+function fallbackParse(text: string, mode: 'inventory' | 'sale') {
+  const t = text.toLowerCase()
+  const brandKeys = Object.keys(brandMap).sort((a, b) => b.length - a.length)
+  const partKeys = Object.keys(partMap).sort((a, b) => b.length - a.length)
+  const brand = brandKeys.find(k => t.includes(k)) ? brandMap[brandKeys.find(k => t.includes(k))!] : ''
+  const part_type = partKeys.find(k => t.includes(k)) ? partMap[partKeys.find(k => t.includes(k))!] : ''
+  const nums = (t.match(/\d+/g) || []).map(Number).filter(n => n > 0)
+  const qtyMatch = t.match(/(\d+)\s*(piece|pcs|pc|peece)/i)
+  const quantity = qtyMatch ? qtyMatch[1] : ''
+  const priceNums = nums.filter(n => n !== (parseInt(quantity) || -1) && n >= 50)
 
-function detectBrand(text: string): string {
-  // Sort by length descending — "google pixel" before "pixel"
-  const keys = Object.keys(brandMap).sort((a, b) => b.length - a.length)
-  for (const key of keys) {
-    if (text.includes(key)) return brandMap[key]
-  }
-  return ''
-}
-
-function detectPart(text: string): string {
-  const keys = Object.keys(partMap).sort((a, b) => b.length - a.length)
-  for (const key of keys) {
-    if (text.includes(key)) return partMap[key]
-  }
-  return ''
-}
-
-function detectModel(text: string, brand: string): string {
-  // Remove brand name from text before searching for model
-  let cleaned = text
-  if (brand) {
-    // Remove all variations of brand
-    const brandKeys = Object.entries(brandMap)
-      .filter(([, v]) => v === brand)
-      .map(([k]) => k)
-    for (const k of brandKeys) {
-      cleaned = cleaned.replace(new RegExp(k, 'gi'), '')
+  if (mode === 'inventory') {
+    return {
+      brand, part_type, quantity, model: '',
+      purchase_price: priceNums.length >= 1 ? priceNums[0].toString() : '',
+      selling_price: priceNums.length >= 2 ? priceNums[priceNums.length - 1].toString() : '',
     }
   }
-
-  // Model patterns — ordered most specific first
-  const patterns = [
-    /hot\s*\d+\s*(?:pro|plus|ultra|play|lite)?/i,
-    /note\s*\d+\s*(?:pro|plus|s|ultra|turbo)?/i,
-    /spark\s*\d+\s*(?:pro|plus|go|neo)?/i,
-    /camon\s*\d+\s*(?:pro|premier)?/i,
-    /pop\s*\d+\s*(?:pro|plus)?/i,
-    /reno\s*\d+\s*(?:pro|f|z)?/i,
-    /nord\s*\d+\s*(?:ce|pro|lite)?/i,
-    /a\d+\s*(?:s|e|f)?(?:\s*5g)?/i,
-    /f\d+\s*(?:pro)?/i,
-    /y\s*\d+\s*(?:s|a)?/i,
-    /v\d+\s*(?:s|pro)?/i,
-    /x\d+\s*(?:pro|gt)?/i,
-    /s\d+\s*(?:fe|ultra|plus|e)?(?:\s*5g)?/i,
-    /\d+\s*(?:pro\s*max|pro|plus|ultra|mini|max)/i,
-    /\d+[a-z]?(?:\s*5g)?/i,
-  ]
-
-  for (const pattern of patterns) {
-    const match = cleaned.match(pattern)
-    if (match) {
-      const result = match[0].trim()
-      // Avoid returning single digits that are likely prices/quantities
-      if (/^\d+$/.test(result) && parseInt(result) < 100) continue
-      return result
-    }
+  return {
+    product_name: brand, quantity,
+    selling_price: priceNums.length >= 1 ? priceNums[priceNums.length - 1].toString() : '',
   }
-  return ''
 }
 
-/**
- * Extract a price value that comes AFTER a keyword
- * e.g. "purchase 300" → "300"
- */
-function extractPriceAfter(text: string, keywords: string[]): string {
-  for (const kw of keywords) {
-    const regex = new RegExp(`${kw}\\s*(?:price|rate|ka|mein|mai|pe)?\\s*(\\d+)`, 'i')
-    const match = text.match(regex)
-    if (match) return match[1]
-  }
-  return ''
-}
-
-/**
- * Extract a price value that comes BEFORE a keyword
- * e.g. "300 mein liya" → "300"
- */
-function extractPriceBefore(text: string, keywords: string[]): string {
-  for (const kw of keywords) {
-    const regex = new RegExp(`(\\d+)\\s*(?:rupay|rs|rupees)?\\s*${kw}`, 'i')
-    const match = text.match(regex)
-    if (match) return match[1]
-  }
-  return ''
-}
-
-function extractQuantity(text: string): string {
-  // "50 piece" / "50 pcs" / "50 pc"
-  const match = text.match(/(\d+)\s*(?:piece|pieces|pcs|pc|peece|adad)/i)
-  return match ? match[1] : ''
-}
-
-function allNumbers(text: string): number[] {
-  return (text.match(/\d+/g) || []).map(Number)
-}
-
-// ─── Inventory Parser ─────────────────────────────────────────────────────────
-
-function parseInventoryVoice(raw: string): Partial<InventoryVoiceData> {
-  const text = raw.toLowerCase()
-
-  const brand = detectBrand(text)
-  const part_type = detectPart(text)
-  const model = detectModel(text, brand)
-  const quantity = extractQuantity(text)
-
-  // Purchase price keywords
-  const purchase_price =
-    extractPriceAfter(text, ['purchase', 'khareed', 'kharida', 'liya', 'cost', 'buy', 'aya', 'aaya', 'mil']) ||
-    extractPriceBefore(text, ['mein liya', 'mai liya', 'ka liya', 'mein aaya'])
-
-  // Selling price keywords
-  const selling_price =
-    extractPriceAfter(text, ['sell', 'selling', 'becho', 'bechna', 'sale', 'dena', 'rakho', 'rakh']) ||
-    extractPriceBefore(text, ['mein becho', 'mai becho', 'mein de', 'pe de'])
-
-  // Fallback: if we couldn't detect prices with keywords,
-  // use positional logic — smaller number = purchase, larger = selling
-  if (!purchase_price || !selling_price) {
-    const nums = allNumbers(text)
-    // Filter out numbers likely to be quantity or model numbers
-    const qty = quantity ? parseInt(quantity) : 0
-    const priceNums = nums.filter(n => {
-      if (n === qty) return false          // skip quantity
-      if (n < 50) return false             // too small to be a price
-      if (n > 100000) return false         // too large
-      return true
-    })
-
-    if (priceNums.length >= 2) {
-      const sorted = [...priceNums].sort((a, b) => a - b)
-      return {
-        brand,
-        model,
-        part_type,
-        quantity,
-        purchase_price: purchase_price || sorted[0].toString(),
-        selling_price: selling_price || sorted[sorted.length - 1].toString(),
-      }
-    }
-
-    if (priceNums.length === 1) {
-      return {
-        brand,
-        model,
-        part_type,
-        quantity,
-        purchase_price: purchase_price || priceNums[0].toString(),
-        selling_price,
-      }
-    }
-  }
-
-  return { brand, model, part_type, quantity, purchase_price, selling_price }
-}
-
-// ─── Sale Parser ──────────────────────────────────────────────────────────────
-
-function parseSaleVoice(raw: string): Partial<SaleVoiceData> {
-  const text = raw.toLowerCase()
-
-  const brand = detectBrand(text)
-  const part_type = detectPart(text)
-  const model = detectModel(text, brand)
-  const product_name = [brand, model, part_type].filter(Boolean).join(' ')
-  const quantity = extractQuantity(text)
-
-  const selling_price =
-    extractPriceBefore(text, ['mein becha', 'mai becha', 'mein sell', 'pe becha', 'mein diya', 'ka becha']) ||
-    extractPriceAfter(text, ['sell', 'becha', 'diya', 'rate', 'price', 'rupay', 'rs']) ||
-    extractPriceBefore(text, ['rupay', 'rs', 'rupees', 'mein', 'mai', 'pe'])
-
-  // Fallback positional
-  if (!selling_price) {
-    const nums = allNumbers(text)
-    const qty = quantity ? parseInt(quantity) : 0
-    const priceNums = nums.filter(n => n !== qty && n >= 50 && n <= 100000)
-    if (priceNums.length >= 1) {
-      return {
-        product_name,
-        quantity,
-        selling_price: priceNums[priceNums.length - 1].toString(),
-      }
-    }
-  }
-
-  return { product_name, quantity, selling_price }
-}
-
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Status Config ────────────────────────────────────────────────────────────
 
 const statusConfig = {
   idle:       { color: 'var(--accent-blue)',   label: '🎤 Voice Entry' },
   listening:  { color: 'var(--accent-red)',    label: '⏹ Sun raha hoon...' },
-  processing: { color: 'var(--accent-yellow)', label: '⏳ Samajh raha hoon...' },
+  processing: { color: 'var(--accent-yellow)', label: '🤖 AI samajh raha hai...' },
   done:       { color: 'var(--accent-green)',  label: '✓ Samajh gaya!' },
   error:      { color: 'var(--accent-red)',    label: '✕ Dobara try karo' },
 }
 
 type Status = keyof typeof statusConfig
 
-const hints = {
-  inventory: 'Misaal: "Infinix Hot 10 back glass 50 piece 300 purchase 500 selling"',
-  sale: 'Misaal: "Oppo A15 display 2 piece 2200 mein becha"',
-}
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function VoiceInput({ mode, onInventoryResult, onSaleResult }: VoiceInputProps) {
   const [isListening, setIsListening] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [status, setStatus] = useState<Status>('idle')
+  const [usingAI, setUsingAI] = useState(false)
+
+  async function handleTranscript(text: string) {
+    setStatus('processing')
+    try {
+      if (GEMINI_API_KEY) {
+        setUsingAI(true)
+        const result = await parseWithGemini(text, mode)
+        if (mode === 'inventory') onInventoryResult(result as Partial<InventoryVoiceData>)
+        else onSaleResult(result as Partial<SaleVoiceData>)
+      } else {
+        setUsingAI(false)
+        const result = fallbackParse(text, mode)
+        if (mode === 'inventory') onInventoryResult(result as Partial<InventoryVoiceData>)
+        else onSaleResult(result as Partial<SaleVoiceData>)
+      }
+      setStatus('done')
+    } catch (err) {
+      console.error('Gemini error, using fallback:', err)
+      setUsingAI(false)
+      const result = fallbackParse(text, mode)
+      if (mode === 'inventory') onInventoryResult(result as Partial<InventoryVoiceData>)
+      else onSaleResult(result as Partial<SaleVoiceData>)
+      setStatus('done')
+    }
+    setTimeout(() => { setStatus('idle'); setUsingAI(false) }, 4000)
+  }
 
   function startListening() {
     const win = window as WindowWithSpeech
     const SR = win.SpeechRecognition || win.webkitSpeechRecognition
-
-    if (!SR) {
-      alert('Aapka browser voice support nahi karta! Chrome use karein.')
-      return
-    }
+    if (!SR) { alert('Aapka browser voice support nahi karta! Chrome use karein.'); return }
 
     const recognition = new SR()
     recognition.lang = 'en-IN'
     recognition.continuous = false
     recognition.interimResults = false
 
-    recognition.onstart = () => {
-      setIsListening(true)
-      setStatus('listening')
-      setTranscript('')
-    }
-
+    recognition.onstart = () => { setIsListening(true); setStatus('listening'); setTranscript('') }
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       const text = event.results[0][0].transcript
       setTranscript(text)
-      setStatus('processing')
-
-      if (mode === 'inventory') {
-        onInventoryResult(parseInventoryVoice(text))
-      } else {
-        onSaleResult(parseSaleVoice(text))
-      }
-
-      setStatus('done')
-
-      // Auto-reset after 4 seconds
-      setTimeout(() => setStatus('idle'), 4000)
+      handleTranscript(text)
     }
-
-    recognition.onerror = () => {
-      setIsListening(false)
-      setStatus('error')
-      setTimeout(() => setStatus('idle'), 3000)
-    }
-
-    recognition.onend = () => {
-      setIsListening(false)
-    }
-
+    recognition.onerror = () => { setIsListening(false); setStatus('error'); setTimeout(() => setStatus('idle'), 3000) }
+    recognition.onend = () => { setIsListening(false) }
     recognition.start()
   }
 
@@ -376,53 +232,48 @@ export default function VoiceInput({ mode, onInventoryResult, onSaleResult }: Vo
     <div>
       <button
         onClick={startListening}
-        disabled={isListening}
+        disabled={isListening || status === 'processing'}
         style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
+          display: 'flex', alignItems: 'center', gap: '8px',
           padding: '10px 18px',
           backgroundColor: `${color}20`,
           border: `1px solid ${color}`,
-          borderRadius: '8px',
-          color,
-          fontSize: '13px',
-          fontWeight: '600',
-          cursor: isListening ? 'not-allowed' : 'pointer',
+          borderRadius: '8px', color,
+          fontSize: '13px', fontWeight: '600',
+          cursor: (isListening || status === 'processing') ? 'not-allowed' : 'pointer',
           transition: 'all 0.2s',
-          opacity: isListening ? 0.7 : 1,
+          opacity: (isListening || status === 'processing') ? 0.7 : 1,
         }}
       >
         {label}
       </button>
 
       {transcript && (
-        <div style={{
-          marginTop: '10px',
-          backgroundColor: 'var(--accent-blue-dim)',
-          border: '1px solid var(--accent-blue)',
-          borderRadius: '8px',
-          padding: '10px 14px',
-        }}>
-          <p style={{
-            fontSize: '11px',
-            color: 'var(--text-muted)',
-            fontFamily: 'IBM Plex Mono, monospace',
-            marginBottom: '4px',
-            letterSpacing: '1px',
-          }}>SUNA:</p>
-          <p style={{ fontSize: '13px', color: 'var(--accent-blue)' }}>{transcript}</p>
+        <div style={{ marginTop: '10px' }}>
+          <div style={{ backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '8px', padding: '10px 14px', marginBottom: '6px' }}>
+            <p style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '4px', letterSpacing: '1px' }}>SUNA:</p>
+            <p style={{ fontSize: '13px', color: 'var(--accent-blue)' }}>{transcript}</p>
+          </div>
+          {status === 'done' && (
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: '6px',
+              backgroundColor: usingAI ? 'var(--accent-green-dim)' : 'var(--accent-yellow-dim)',
+              border: `1px solid ${usingAI ? 'var(--accent-green)' : 'var(--accent-yellow)'}`,
+              borderRadius: '6px', padding: '4px 10px',
+            }}>
+              <span style={{ fontSize: '11px', color: usingAI ? 'var(--accent-green)' : 'var(--accent-yellow)', fontFamily: 'IBM Plex Mono, monospace' }}>
+                {usingAI ? '🤖 Gemini AI se parse hua' : '⚙ Rule-based parse hua'}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
       {status === 'idle' && (
-        <p style={{
-          fontSize: '11px',
-          color: 'var(--text-muted)',
-          marginTop: '8px',
-          fontFamily: 'IBM Plex Mono, monospace',
-        }}>
-          {hints[mode]}
+        <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px', fontFamily: 'IBM Plex Mono, monospace' }}>
+          {mode === 'inventory'
+            ? 'Misaal: "Infinix Hot 10 back glass 50 piece 300 purchase 500 selling"'
+            : 'Misaal: "Oppo A15 display 2 piece 2200 mein becha"'}
         </p>
       )}
     </div>

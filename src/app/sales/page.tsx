@@ -23,6 +23,8 @@ export default function Sales() {
   const [searchQuery, setSearchQuery] = useState('')
   const [totalRevenue, setTotalRevenue] = useState(0)
   const [showSaleModal, setShowSaleModal] = useState(false)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [selectedSale, setSelectedSale] = useState<Sale | null>(null)
   const [saving, setSaving] = useState(false)
   const [newSale, setNewSale] = useState({ product_id: '', quantity: '', selling_price: '' })
 
@@ -66,12 +68,38 @@ export default function Sales() {
       if (!product) return
       const quantity = parseInt(newSale.quantity)
       const selling_price = parseFloat(newSale.selling_price)
-      const { error: saleError } = await supabase.from('sales').insert([{ product_id: newSale.product_id, quantity, selling_price, total_amount: quantity * selling_price }])
+      const { error: saleError } = await supabase.from('sales').insert([{
+        product_id: newSale.product_id, quantity, selling_price,
+        total_amount: quantity * selling_price
+      }])
       if (saleError) throw saleError
-      const { error: updateError } = await supabase.from('products').update({ quantity: product.quantity - quantity }).eq('id', product.id)
+      const { error: updateError } = await supabase.from('products')
+        .update({ quantity: product.quantity - quantity }).eq('id', product.id)
       if (updateError) throw updateError
       setShowSaleModal(false)
       setNewSale({ product_id: '', quantity: '', selling_price: '' })
+      await refetch()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function deleteSale() {
+    if (!selectedSale) return
+    setSaving(true)
+    try {
+      // Restore product quantity
+      const { error: restoreError } = await supabase.from('products')
+        .update({ quantity: (selectedSale.product?.quantity || 0) + selectedSale.quantity })
+        .eq('id', selectedSale.product_id)
+      if (restoreError) throw restoreError
+
+      const { error } = await supabase.from('sales').delete().eq('id', selectedSale.id)
+      if (error) throw error
+      setShowDeleteModal(false)
+      setSelectedSale(null)
       await refetch()
     } catch (err) {
       console.error(err)
@@ -154,7 +182,9 @@ export default function Sales() {
 
       {/* Search */}
       <div style={{ marginBottom: '16px' }}>
-        <input type="text" placeholder="🔍  Sale search karo..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ ...inputStyle, padding: '12px 16px' }} />
+        <input type="text" placeholder="🔍  Sale search karo..." value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          style={{ ...inputStyle, padding: '12px 16px' }} />
       </div>
 
       {/* Desktop Table */}
@@ -162,14 +192,14 @@ export default function Sales() {
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border)' }}>
-              {['Product', 'Brand', 'Qty', 'Price', 'Total', 'Date'].map(h => (
+              {['Product', 'Brand', 'Qty', 'Price', 'Total', 'Date', 'Action'].map(h => (
                 <th key={h} style={{ textAlign: 'left', padding: '14px 20px', fontSize: '11px', letterSpacing: '1px', color: 'var(--text-muted)', textTransform: 'uppercase', fontFamily: 'IBM Plex Mono, monospace', fontWeight: '500' }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {filteredSales.length === 0 ? (
-              <tr><td colSpan={6} style={{ textAlign: 'center', padding: '60px', color: 'var(--text-muted)' }}>
+              <tr><td colSpan={7} style={{ textAlign: 'center', padding: '60px', color: 'var(--text-muted)' }}>
                 <div style={{ fontSize: '32px', marginBottom: '8px' }}>◈</div>
                 <p style={{ fontSize: '13px' }}>Koi sale nahi mili</p>
               </td></tr>
@@ -181,6 +211,13 @@ export default function Sales() {
                 <td style={{ padding: '14px 20px', color: 'var(--text-secondary)', fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{sale.selling_price?.toLocaleString()}</td>
                 <td style={{ padding: '14px 20px', fontFamily: 'IBM Plex Mono, monospace' }}><span style={{ color: 'var(--accent-green)', fontWeight: '600', fontSize: '13px' }}>Rs.{sale.total_amount?.toLocaleString()}</span></td>
                 <td style={{ padding: '14px 20px', color: 'var(--text-muted)', fontSize: '12px', fontFamily: 'IBM Plex Mono, monospace' }}>{new Date(sale.sold_at).toLocaleDateString('en-PK')}</td>
+                <td style={{ padding: '14px 20px' }}>
+                  <button
+                    onClick={() => { setSelectedSale(sale); setShowDeleteModal(true) }}
+                    style={{ padding: '6px 12px', backgroundColor: 'var(--bg-hover)', border: '1px solid var(--border-bright)', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
+                    ✕ Delete
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -203,9 +240,22 @@ export default function Sales() {
               </div>
               <span style={{ fontSize: '15px', fontWeight: '700', color: 'var(--accent-green)', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{sale.total_amount?.toLocaleString()}</span>
             </div>
-            <div style={{ display: 'flex', gap: '16px' }}>
-              <div><p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Qty</p><p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>{sale.quantity} pcs</p></div>
-              <div><p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Price</p><p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>Rs.{sale.selling_price?.toLocaleString()}</p></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '16px' }}>
+                <div>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Qty</p>
+                  <p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>{sale.quantity} pcs</p>
+                </div>
+                <div>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Price</p>
+                  <p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>Rs.{sale.selling_price?.toLocaleString()}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => { setSelectedSale(sale); setShowDeleteModal(true) }}
+                style={{ padding: '8px 14px', backgroundColor: 'var(--bg-hover)', border: '1px solid var(--border-bright)', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
+                ✕ Delete
+              </button>
             </div>
           </div>
         ))}
@@ -220,7 +270,10 @@ export default function Sales() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div>
                 <label style={labelStyle}>Product</label>
-                <select value={newSale.product_id} onChange={(e) => { const product = products.find(p => p.id === e.target.value); setNewSale({ ...newSale, product_id: e.target.value, selling_price: product ? product.selling_price.toString() : '' }) }} style={inputStyle}>
+                <select value={newSale.product_id} onChange={(e) => {
+                  const product = products.find(p => p.id === e.target.value)
+                  setNewSale({ ...newSale, product_id: e.target.value, selling_price: product ? product.selling_price.toString() : '' })
+                }} style={inputStyle}>
                   <option value="">Product select karo</option>
                   {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.quantity})</option>)}
                 </select>
@@ -243,6 +296,25 @@ export default function Sales() {
             <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
               <button onClick={() => { setShowSaleModal(false); setNewSale({ product_id: '', quantity: '', selling_price: '' }) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
               <button onClick={addSale} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Sale Confirm ✓'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Modal */}
+      {showDeleteModal && selectedSale && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '16px' }}>
+          <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--accent-red)', borderRadius: '16px', padding: '28px', width: '100%', maxWidth: '400px' }}>
+            <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--accent-red)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>DELETE</p>
+            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '8px' }}>Sale Delete Karo?</h2>
+            <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '8px' }}>Yeh sale delete hogi aur product ka stock wapas aa jayega:</p>
+            <div style={{ padding: '12px 14px', backgroundColor: 'var(--accent-red-dim)', borderRadius: '8px', marginBottom: '24px' }}>
+              <p style={{ color: 'var(--accent-red)', fontSize: '14px', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '4px' }}>{selectedSale.product?.name}</p>
+              <p style={{ color: 'var(--text-muted)', fontSize: '12px', fontFamily: 'IBM Plex Mono, monospace' }}>{selectedSale.quantity} pcs — Rs.{selectedSale.total_amount?.toLocaleString()}</p>
+            </div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={() => { setShowDeleteModal(false); setSelectedSale(null) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={deleteSale} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '8px', color: 'var(--accent-red)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Deleting...' : 'Delete ✕'}</button>
             </div>
           </div>
         </div>

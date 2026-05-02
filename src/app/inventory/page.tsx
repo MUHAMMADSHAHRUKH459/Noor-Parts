@@ -29,19 +29,43 @@ const labelStyle = {
   display: 'block',
 }
 
+interface BulkRow {
+  brand: string
+  model: string
+  part_type: string
+  quantity: string
+  purchase_price: string
+  selling_price: string
+}
+
+const emptyRow = (): BulkRow => ({
+  brand: '', model: '', part_type: '',
+  quantity: '', purchase_price: '', selling_price: '',
+})
+
 export default function Inventory() {
   const [products, setProducts] = useState<Product[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModal, setShowAddModal] = useState(false)
+  const [showBulkModal, setShowBulkModal] = useState(false)
   const [showSoldModal, setShowSoldModal] = useState(false)
+  const [showEditModal, setShowEditModal] = useState(false)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [saving, setSaving] = useState(false)
+  const [bulkRows, setBulkRows] = useState<BulkRow[]>([emptyRow(), emptyRow(), emptyRow()])
 
   const [newProduct, setNewProduct] = useState({
     brand: '', model: '', part_type: '',
     purchase_price: '', selling_price: '', quantity: '',
   })
+
+  const [editProduct, setEditProduct] = useState({
+    brand: '', model: '', part_type: '',
+    purchase_price: '', selling_price: '', quantity: '',
+  })
+
   const [soldData, setSoldData] = useState({ quantity: '', selling_price: '' })
 
   useEffect(() => {
@@ -61,6 +85,11 @@ export default function Inventory() {
     return () => { isMounted = false }
   }, [])
 
+  async function refetchProducts() {
+    const { data } = await supabase.from('products').select('*').order('created_at', { ascending: false })
+    setProducts(data || [])
+  }
+
   async function addProduct() {
     if (!newProduct.brand || !newProduct.model || !newProduct.part_type) return
     setSaving(true)
@@ -76,8 +105,71 @@ export default function Inventory() {
       if (error) throw error
       setShowAddModal(false)
       setNewProduct({ brand: '', model: '', part_type: '', purchase_price: '', selling_price: '', quantity: '' })
-      const { data } = await supabase.from('products').select('*').order('created_at', { ascending: false })
-      setProducts(data || [])
+      await refetchProducts()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function addBulkProducts() {
+    const validRows = bulkRows.filter(r => r.brand && r.model && r.part_type)
+    if (validRows.length === 0) return
+    setSaving(true)
+    try {
+      const { error } = await supabase.from('products').insert(
+        validRows.map(r => ({
+          name: `${r.brand} ${r.model} ${r.part_type}`,
+          brand: r.brand, model: r.model, part_type: r.part_type,
+          purchase_price: parseFloat(r.purchase_price) || 0,
+          selling_price: parseFloat(r.selling_price) || 0,
+          quantity: parseInt(r.quantity) || 0,
+          category_id: null,
+        }))
+      )
+      if (error) throw error
+      setShowBulkModal(false)
+      setBulkRows([emptyRow(), emptyRow(), emptyRow()])
+      await refetchProducts()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function updateProduct() {
+    if (!selectedProduct) return
+    setSaving(true)
+    try {
+      const { error } = await supabase.from('products').update({
+        name: `${editProduct.brand} ${editProduct.model} ${editProduct.part_type}`,
+        brand: editProduct.brand, model: editProduct.model, part_type: editProduct.part_type,
+        purchase_price: parseFloat(editProduct.purchase_price) || 0,
+        selling_price: parseFloat(editProduct.selling_price) || 0,
+        quantity: parseInt(editProduct.quantity) || 0,
+      }).eq('id', selectedProduct.id)
+      if (error) throw error
+      setShowEditModal(false)
+      setSelectedProduct(null)
+      await refetchProducts()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function deleteProduct() {
+    if (!selectedProduct) return
+    setSaving(true)
+    try {
+      const { error } = await supabase.from('products').delete().eq('id', selectedProduct.id)
+      if (error) throw error
+      setShowDeleteModal(false)
+      setSelectedProduct(null)
+      await refetchProducts()
     } catch (err) {
       console.error(err)
     } finally {
@@ -102,8 +194,7 @@ export default function Inventory() {
       setShowSoldModal(false)
       setSoldData({ quantity: '', selling_price: '' })
       setSelectedProduct(null)
-      const { data } = await supabase.from('products').select('*').order('created_at', { ascending: false })
-      setProducts(data || [])
+      await refetchProducts()
     } catch (err) {
       console.error(err)
     } finally {
@@ -111,11 +202,56 @@ export default function Inventory() {
     }
   }
 
+  function openEditModal(product: Product) {
+    setSelectedProduct(product)
+    setEditProduct({
+      brand: product.brand,
+      model: product.model,
+      part_type: product.part_type,
+      purchase_price: product.purchase_price.toString(),
+      selling_price: product.selling_price.toString(),
+      quantity: product.quantity.toString(),
+    })
+    setShowEditModal(true)
+  }
+
+  const bulkTotal = bulkRows.reduce((sum, r) => {
+    const qty = parseInt(r.quantity) || 0
+    const price = parseFloat(r.purchase_price) || 0
+    return sum + (qty * price)
+  }, 0)
+
   const filteredProducts = products.filter(p =>
     p.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     p.brand?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     p.model?.toLowerCase().includes(searchQuery.toLowerCase())
   )
+
+  const actionButtons = (product: Product) => (
+    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+      <button
+        onClick={() => { setSelectedProduct(product); setSoldData({ quantity: '', selling_price: product.selling_price?.toString() || '' }); setShowSoldModal(true) }}
+        style={{ padding: '6px 10px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '6px', color: 'var(--accent-red)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
+        Sold ✓
+      </button>
+      <button
+        onClick={() => openEditModal(product)}
+        style={{ padding: '6px 10px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '6px', color: 'var(--accent-blue)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
+        ✎ Edit
+      </button>
+      <button
+        onClick={() => { setSelectedProduct(product); setShowDeleteModal(true) }}
+        style={{ padding: '6px 10px', backgroundColor: 'var(--bg-hover)', border: '1px solid var(--border-bright)', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
+        ✕
+      </button>
+    </div>
+  )
+
+  const updateBulkRow = (index: number, field: keyof BulkRow, value: string) => {
+    const updated = [...bulkRows]
+    updated[index] = { ...updated[index], [field]: value }
+    setBulkRows(updated)
+  }
 
   if (loading) {
     return (
@@ -154,44 +290,37 @@ export default function Inventory() {
             }}
             onSaleResult={() => {}}
           />
+          <button onClick={() => setShowBulkModal(true)} style={{
+            padding: '10px 18px',
+            backgroundColor: 'var(--accent-purple-dim)',
+            border: '1px solid var(--accent-purple)',
+            borderRadius: '8px', color: 'var(--accent-purple)',
+            fontSize: '13px', fontWeight: '600', cursor: 'pointer',
+          }}>⊞ Bulk Add</button>
           <button onClick={() => setShowAddModal(true)} style={{
-            display: 'flex', alignItems: 'center', gap: '8px',
             padding: '10px 18px',
             backgroundColor: 'var(--accent-green-dim)',
             border: '1px solid var(--accent-green)',
             borderRadius: '8px', color: 'var(--accent-green)',
             fontSize: '13px', fontWeight: '600', cursor: 'pointer',
-          }}>
-            + Add Karo
-          </button>
+          }}>+ Single Add</button>
         </div>
       </div>
 
       {/* Search */}
       <div style={{ marginBottom: '16px' }}>
-        <input
-          type="text"
-          placeholder="🔍  Search karo..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          style={{ ...inputStyle, padding: '12px 16px' }}
-        />
+        <input type="text" placeholder="Search by product, brand or model..."
+          value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
+          style={{ ...inputStyle, padding: '12px 16px' }} />
       </div>
 
       {/* Desktop Table */}
-      <div className="desktop-table" style={{
-        backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)',
-        borderRadius: '12px', overflow: 'hidden',
-      }}>
+      <div className="desktop-table" style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border)' }}>
-              {['Product', 'Brand', 'Part', 'Stock', 'Buy Price', 'Sell Price', 'Action'].map(h => (
-                <th key={h} style={{
-                  textAlign: 'left', padding: '14px 20px',
-                  fontSize: '11px', letterSpacing: '1px', color: 'var(--text-muted)',
-                  textTransform: 'uppercase', fontFamily: 'IBM Plex Mono, monospace', fontWeight: '500',
-                }}>{h}</th>
+              {['Product', 'Brand', 'Part', 'Stock', 'Buy Price', 'Sell Price', 'Actions'].map(h => (
+                <th key={h} style={{ textAlign: 'left', padding: '14px 20px', fontSize: '11px', letterSpacing: '1px', color: 'var(--text-muted)', textTransform: 'uppercase', fontFamily: 'IBM Plex Mono, monospace', fontWeight: '500' }}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -200,7 +329,7 @@ export default function Inventory() {
               <tr>
                 <td colSpan={7} style={{ textAlign: 'center', padding: '60px', color: 'var(--text-muted)' }}>
                   <div style={{ fontSize: '32px', marginBottom: '8px' }}>◫</div>
-                  <p style={{ fontSize: '13px' }}>Koi product nahi mila</p>
+                  <p style={{ fontSize: '13px' }}>No products found</p>
                 </td>
               </tr>
             ) : (
@@ -211,20 +340,14 @@ export default function Inventory() {
                   <td style={{ padding: '14px 20px', color: 'var(--text-secondary)', fontSize: '13px' }}>{product.part_type}</td>
                   <td style={{ padding: '14px 20px' }}>
                     <span style={{
-                      padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600',
-                      fontFamily: 'IBM Plex Mono, monospace',
+                      padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600', fontFamily: 'IBM Plex Mono, monospace',
                       backgroundColor: product.quantity > 10 ? 'var(--accent-green-dim)' : product.quantity > 0 ? 'var(--accent-yellow-dim)' : 'var(--accent-red-dim)',
                       color: product.quantity > 10 ? 'var(--accent-green)' : product.quantity > 0 ? 'var(--accent-yellow)' : 'var(--accent-red)',
                     }}>{product.quantity} pcs</span>
                   </td>
                   <td style={{ padding: '14px 20px', color: 'var(--text-secondary)', fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{product.purchase_price?.toLocaleString()}</td>
                   <td style={{ padding: '14px 20px', color: 'var(--text-secondary)', fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{product.selling_price?.toLocaleString()}</td>
-                  <td style={{ padding: '14px 20px' }}>
-                    <button onClick={() => { setSelectedProduct(product); setSoldData({ quantity: '', selling_price: product.selling_price?.toString() || '' }); setShowSoldModal(true) }}
-                      style={{ padding: '6px 14px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '6px', color: 'var(--accent-red)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
-                      Sold ✓
-                    </button>
-                  </td>
+                  <td style={{ padding: '14px 20px' }}>{actionButtons(product)}</td>
                 </tr>
               ))
             )}
@@ -237,14 +360,11 @@ export default function Inventory() {
         {filteredProducts.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)' }}>
             <div style={{ fontSize: '32px', marginBottom: '8px' }}>◫</div>
-            <p style={{ fontSize: '13px' }}>Koi product nahi mila</p>
+            <p style={{ fontSize: '13px' }}>No products found</p>
           </div>
         ) : (
           filteredProducts.map(product => (
-            <div key={product.id} style={{
-              backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)',
-              borderRadius: '12px', padding: '16px', marginBottom: '10px',
-            }}>
+            <div key={product.id} style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '10px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
                 <div style={{ flex: 1 }}>
                   <p style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '2px' }}>{product.name}</p>
@@ -257,7 +377,7 @@ export default function Inventory() {
                   color: product.quantity > 10 ? 'var(--accent-green)' : product.quantity > 0 ? 'var(--accent-yellow)' : 'var(--accent-red)',
                 }}>{product.quantity} pcs</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px' }}>
                 <div style={{ display: 'flex', gap: '16px' }}>
                   <div>
                     <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Buy</p>
@@ -268,38 +388,35 @@ export default function Inventory() {
                     <p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>Rs.{product.selling_price?.toLocaleString()}</p>
                   </div>
                 </div>
-                <button onClick={() => { setSelectedProduct(product); setSoldData({ quantity: '', selling_price: product.selling_price?.toString() || '' }); setShowSoldModal(true) }}
-                  style={{ padding: '8px 16px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '6px', color: 'var(--accent-red)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
-                  Sold ✓
-                </button>
               </div>
+              {actionButtons(product)}
             </div>
           ))
         )}
       </div>
 
-      {/* Add Modal */}
+      {/* Single Add Modal */}
       {showAddModal && (
         <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '16px' }}>
           <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '16px', padding: '28px', width: '100%', maxWidth: '440px', maxHeight: '90vh', overflowY: 'auto' }}>
             <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--text-muted)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>INVENTORY</p>
-            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '24px' }}>Product Add Karo</h2>
+            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '24px' }}>Add Single Product</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div>
                 <label style={labelStyle}>Brand</label>
                 <select value={newProduct.brand} onChange={(e) => setNewProduct({ ...newProduct, brand: e.target.value })} style={inputStyle}>
-                  <option value="">Brand select karo</option>
+                  <option value="">Select brand</option>
                   {brands.map(b => <option key={b} value={b}>{b}</option>)}
                 </select>
               </div>
               <div>
                 <label style={labelStyle}>Model</label>
-                <input type="text" placeholder="Hot 10, Note 12, A54..." value={newProduct.model} onChange={(e) => setNewProduct({ ...newProduct, model: e.target.value })} style={inputStyle} />
+                <input type="text" placeholder="e.g. Hot 10, Note 12, A54" value={newProduct.model} onChange={(e) => setNewProduct({ ...newProduct, model: e.target.value })} style={inputStyle} />
               </div>
               <div>
                 <label style={labelStyle}>Part Type</label>
                 <select value={newProduct.part_type} onChange={(e) => setNewProduct({ ...newProduct, part_type: e.target.value })} style={inputStyle}>
-                  <option value="">Part select karo</option>
+                  <option value="">Select part type</option>
                   {partTypes.map(p => <option key={p} value={p}>{p}</option>)}
                 </select>
               </div>
@@ -315,12 +432,153 @@ export default function Inventory() {
               </div>
               <div>
                 <label style={labelStyle}>Quantity</label>
-                <input type="number" placeholder="Kitne piece hain?" value={newProduct.quantity} onChange={(e) => setNewProduct({ ...newProduct, quantity: e.target.value })} style={inputStyle} />
+                <input type="number" placeholder="Number of pieces" value={newProduct.quantity} onChange={(e) => setNewProduct({ ...newProduct, quantity: e.target.value })} style={inputStyle} />
               </div>
             </div>
             <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
               <button onClick={() => setShowAddModal(false)} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
-              <button onClick={addProduct} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Add Karo ✓'}</button>
+              <button onClick={addProduct} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Add Product ✓'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Add Modal */}
+      {showBulkModal && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '16px' }}>
+          <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--accent-purple)', borderRadius: '16px', padding: '28px', width: '100%', maxWidth: '1000px', maxHeight: '90vh', overflowY: 'auto' }}>
+            <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--accent-purple)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>BULK ENTRY</p>
+            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '6px' }}>Add Multiple Products</h2>
+            <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '24px' }}>Fill in the details for each product. Empty rows will be ignored.</p>
+
+            {/* Column Headers */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.2fr 1.4fr 0.6fr 0.9fr 0.9fr 0.3fr', gap: '8px', marginBottom: '8px', padding: '0 4px' }}>
+              {['Brand', 'Model', 'Part Type', 'Qty', 'Buy Price', 'Sell Price', ''].map(h => (
+                <p key={h} style={{ fontSize: '10px', color: 'var(--text-muted)', letterSpacing: '1px', textTransform: 'uppercase', fontFamily: 'IBM Plex Mono, monospace' }}>{h}</p>
+              ))}
+            </div>
+
+            {/* Rows */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
+              {bulkRows.map((row, index) => (
+                <div key={index} style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.2fr 1.4fr 0.6fr 0.9fr 0.9fr 0.3fr', gap: '8px' }}>
+                  <select value={row.brand} onChange={(e) => updateBulkRow(index, 'brand', e.target.value)} style={{ ...inputStyle, padding: '8px 10px', fontSize: '13px' }}>
+                    <option value="">Brand</option>
+                    {brands.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                  <input type="text" placeholder="Model" value={row.model} onChange={(e) => updateBulkRow(index, 'model', e.target.value)} style={{ ...inputStyle, padding: '8px 10px', fontSize: '13px' }} />
+                  <select value={row.part_type} onChange={(e) => updateBulkRow(index, 'part_type', e.target.value)} style={{ ...inputStyle, padding: '8px 10px', fontSize: '13px' }}>
+                    <option value="">Part Type</option>
+                    {partTypes.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                  <input type="number" placeholder="Qty" value={row.quantity} onChange={(e) => updateBulkRow(index, 'quantity', e.target.value)} style={{ ...inputStyle, padding: '8px 10px', fontSize: '13px' }} />
+                  <input type="number" placeholder="Rs." value={row.purchase_price} onChange={(e) => updateBulkRow(index, 'purchase_price', e.target.value)} style={{ ...inputStyle, padding: '8px 10px', fontSize: '13px' }} />
+                  <input type="number" placeholder="Rs." value={row.selling_price} onChange={(e) => updateBulkRow(index, 'selling_price', e.target.value)} style={{ ...inputStyle, padding: '8px 10px', fontSize: '13px' }} />
+                  <button onClick={() => { if (bulkRows.length > 1) setBulkRows(bulkRows.filter((_, i) => i !== index)) }}
+                    style={{ padding: '8px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '6px', color: 'var(--accent-red)', fontSize: '14px', cursor: 'pointer' }}>✕</button>
+                </div>
+              ))}
+            </div>
+
+            {/* Add Row */}
+            <button onClick={() => setBulkRows([...bulkRows, emptyRow()])} style={{
+              width: '100%', padding: '10px',
+              backgroundColor: 'transparent',
+              border: '1px dashed var(--border-bright)',
+              borderRadius: '8px', color: 'var(--text-muted)',
+              fontSize: '13px', cursor: 'pointer', marginBottom: '20px',
+            }}>+ Add Row</button>
+
+            {/* Total */}
+            {bulkTotal > 0 && (
+              <div style={{ backgroundColor: 'var(--accent-purple-dim)', border: '1px solid var(--accent-purple)', borderRadius: '10px', padding: '14px 18px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '4px' }}>TOTAL INVESTMENT</p>
+                  <p style={{ fontSize: '22px', fontWeight: '700', color: 'var(--accent-purple)', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{bulkTotal.toLocaleString()}</p>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '4px' }}>ZAKAT (2.5%)</p>
+                  <p style={{ fontSize: '16px', fontWeight: '700', color: 'var(--accent-yellow)', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{(bulkTotal * 0.025).toLocaleString()}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Valid rows count */}
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px', fontFamily: 'IBM Plex Mono, monospace' }}>
+              {bulkRows.filter(r => r.brand && r.model && r.part_type).length} of {bulkRows.length} rows ready to save
+            </p>
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={() => { setShowBulkModal(false); setBulkRows([emptyRow(), emptyRow(), emptyRow()]) }}
+                style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={addBulkProducts} disabled={saving}
+                style={{ flex: 2, padding: '11px', backgroundColor: 'var(--accent-purple-dim)', border: '1px solid var(--accent-purple)', borderRadius: '8px', color: 'var(--accent-purple)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>
+                {saving ? 'Saving...' : `Save ${bulkRows.filter(r => r.brand && r.model && r.part_type).length} Products ✓`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Modal */}
+      {showEditModal && selectedProduct && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '16px' }}>
+          <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--accent-blue)', borderRadius: '16px', padding: '28px', width: '100%', maxWidth: '440px', maxHeight: '90vh', overflowY: 'auto' }}>
+            <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--accent-blue)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>EDIT</p>
+            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '24px' }}>Edit Product</h2>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div>
+                <label style={labelStyle}>Brand</label>
+                <select value={editProduct.brand} onChange={(e) => setEditProduct({ ...editProduct, brand: e.target.value })} style={inputStyle}>
+                  <option value="">Select brand</option>
+                  {brands.map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>Model</label>
+                <input type="text" value={editProduct.model} onChange={(e) => setEditProduct({ ...editProduct, model: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <label style={labelStyle}>Part Type</label>
+                <select value={editProduct.part_type} onChange={(e) => setEditProduct({ ...editProduct, part_type: e.target.value })} style={inputStyle}>
+                  <option value="">Select part type</option>
+                  {partTypes.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={labelStyle}>Buy Price</label>
+                  <input type="number" value={editProduct.purchase_price} onChange={(e) => setEditProduct({ ...editProduct, purchase_price: e.target.value })} style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Sell Price</label>
+                  <input type="number" value={editProduct.selling_price} onChange={(e) => setEditProduct({ ...editProduct, selling_price: e.target.value })} style={inputStyle} />
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Quantity</label>
+                <input type="number" value={editProduct.quantity} onChange={(e) => setEditProduct({ ...editProduct, quantity: e.target.value })} style={inputStyle} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
+              <button onClick={() => { setShowEditModal(false); setSelectedProduct(null) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={updateProduct} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '8px', color: 'var(--accent-blue)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Update ✓'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Modal */}
+      {showDeleteModal && selectedProduct && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '16px' }}>
+          <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--accent-red)', borderRadius: '16px', padding: '28px', width: '100%', maxWidth: '400px' }}>
+            <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--accent-red)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>DELETE</p>
+            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '8px' }}>Delete Product?</h2>
+            <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '8px' }}>This product will be permanently deleted:</p>
+            <p style={{ color: 'var(--accent-red)', fontSize: '14px', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '24px', padding: '10px 14px', backgroundColor: 'var(--accent-red-dim)', borderRadius: '8px' }}>{selectedProduct.name}</p>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={() => { setShowDeleteModal(false); setSelectedProduct(null) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={deleteProduct} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '8px', color: 'var(--accent-red)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Deleting...' : 'Delete ✕'}</button>
             </div>
           </div>
         </div>
@@ -331,12 +589,12 @@ export default function Inventory() {
         <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '16px' }}>
           <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '16px', padding: '28px', width: '100%', maxWidth: '400px' }}>
             <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--text-muted)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>SALE</p>
-            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '4px' }}>Product Sell Karo</h2>
+            <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '4px' }}>Sell Product</h2>
             <p style={{ color: 'var(--accent-green)', fontSize: '13px', marginBottom: '24px', fontFamily: 'IBM Plex Mono, monospace' }}>{selectedProduct.name}</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div>
                 <label style={labelStyle}>Quantity</label>
-                <input type="number" placeholder="Kitne piece?" value={soldData.quantity} onChange={(e) => setSoldData({ ...soldData, quantity: e.target.value })} style={inputStyle} />
+                <input type="number" placeholder="Number of pieces" value={soldData.quantity} onChange={(e) => setSoldData({ ...soldData, quantity: e.target.value })} style={inputStyle} />
               </div>
               <div>
                 <label style={labelStyle}>Selling Price</label>
@@ -353,7 +611,7 @@ export default function Inventory() {
             </div>
             <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
               <button onClick={() => { setShowSoldModal(false); setSelectedProduct(null) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
-              <button onClick={markAsSold} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '8px', color: 'var(--accent-red)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Sell Confirm ✓'}</button>
+              <button onClick={markAsSold} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '8px', color: 'var(--accent-red)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Confirm Sale ✓'}</button>
             </div>
           </div>
         </div>
