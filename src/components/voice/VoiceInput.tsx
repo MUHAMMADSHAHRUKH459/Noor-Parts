@@ -49,7 +49,7 @@ interface WindowWithSpeech extends Window {
 
 // ─── Gemini Parser ────────────────────────────────────────────────────────────
 
-const GEMINI_API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 
 const INVENTORY_PROMPT = `You are a parser for a Pakistani mobile parts shop inventory system.
 The shopkeeper speaks in Roman Urdu or English. Extract the following fields from the transcript.

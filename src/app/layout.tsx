@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import Sidebar from '@/components/ui/Sidebar'
+import Chatbot from '@/components/chatbot/Chatbot'
 
 export const metadata: Metadata = {
   title: 'Noor Parts',
@@ -20,6 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             {children}
           </main>
         </div>
+        <Chatbot />
 
         <style>{`
           @media (max-width: 768px) {
