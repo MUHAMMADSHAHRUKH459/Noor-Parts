@@ -97,7 +97,11 @@ export default function Inventory() {
     const qty = parseInt(form.quantity) || 0
     if (!buy || !sell || !qty) return null
     const profitPerPiece = sell - buy
-    return { profitPerPiece, totalProfit: profitPerPiece * qty, margin: buy > 0 ? ((profitPerPiece / buy) * 100).toFixed(0) : 0 }
+    return {
+      profitPerPiece,
+      totalProfit: profitPerPiece * qty,
+      margin: buy > 0 ? ((profitPerPiece / buy) * 100).toFixed(0) : 0
+    }
   }, [form.purchase_price, form.selling_price, form.quantity])
 
   const filteredProducts = useMemo(() => products.filter(p =>
@@ -112,6 +116,7 @@ export default function Inventory() {
     inStock: products.filter(p => p.quantity > 10).length,
     low: products.filter(p => p.quantity > 0 && p.quantity <= 10).length,
     out: products.filter(p => p.quantity === 0).length,
+    totalValue: products.reduce((sum, p) => sum + ((p.purchase_price || 0) * (p.quantity || 0)), 0),
   }), [products])
 
   async function addProduct() {
@@ -172,8 +177,13 @@ export default function Inventory() {
     try {
       const quantity = parseInt(soldData.quantity)
       const selling_price = parseFloat(soldData.selling_price)
-      await supabase.from('sales').insert([{ product_id: selectedProduct.id, quantity, selling_price, total_amount: quantity * selling_price }])
-      await supabase.from('products').update({ quantity: selectedProduct.quantity - quantity }).eq('id', selectedProduct.id)
+      await supabase.from('sales').insert([{
+        product_id: selectedProduct.id, quantity, selling_price,
+        total_amount: quantity * selling_price
+      }])
+      await supabase.from('products').update({
+        quantity: selectedProduct.quantity - quantity
+      }).eq('id', selectedProduct.id)
       setShowSoldModal(false); setSoldData({ quantity: '', selling_price: '' }); setSelectedProduct(null); await refetch()
     } catch (err) { console.error(err) }
     finally { setSaving(false) }
@@ -181,7 +191,12 @@ export default function Inventory() {
 
   function openEditModal(product: Product) {
     setSelectedProduct(product)
-    setEditForm({ brand: product.brand || '', model: product.model || '', part_type: product.part_type || '', purchase_price: product.purchase_price?.toString() || '', selling_price: product.selling_price?.toString() || '', quantity: product.quantity?.toString() || '' })
+    setEditForm({
+      brand: product.brand || '', model: product.model || '', part_type: product.part_type || '',
+      purchase_price: product.purchase_price?.toString() || '',
+      selling_price: product.selling_price?.toString() || '',
+      quantity: product.quantity?.toString() || ''
+    })
     setShowEditModal(true)
   }
 
@@ -207,14 +222,55 @@ export default function Inventory() {
         <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <VoiceInput mode="inventory"
             onInventoryResult={(data: Partial<InventoryVoiceData>) => {
-              setForm(prev => ({ ...prev, brand: data.brand || prev.brand, model: data.model || prev.model, part_type: data.part_type || prev.part_type, quantity: data.quantity || prev.quantity, purchase_price: data.purchase_price || prev.purchase_price, selling_price: data.selling_price || prev.selling_price }))
+              setForm(prev => ({
+                ...prev,
+                brand: data.brand || prev.brand,
+                model: data.model || prev.model,
+                part_type: data.part_type || prev.part_type,
+                quantity: data.quantity || prev.quantity,
+                purchase_price: data.purchase_price || prev.purchase_price,
+                selling_price: data.selling_price || prev.selling_price,
+              }))
               setShowAddModal(true)
             }}
             onSaleResult={() => {}}
           />
-          <button onClick={() => setShowAddModal(true)} style={{ padding: '10px 20px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}>
-            + Add Product
-          </button>
+          <button onClick={() => setShowAddModal(true)} style={{
+            padding: '10px 20px', backgroundColor: 'var(--accent-green-dim)',
+            border: '1px solid var(--accent-green)', borderRadius: '8px',
+            color: 'var(--accent-green)', fontSize: '13px', fontWeight: '600', cursor: 'pointer'
+          }}>+ Add Product</button>
+        </div>
+      </div>
+
+      {/* Total Inventory Value Banner */}
+      <div style={{
+        backgroundColor: 'var(--bg-card)',
+        border: '1px solid var(--accent-green)',
+        borderRadius: '12px', padding: '18px 24px',
+        marginBottom: '16px',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        flexWrap: 'wrap', gap: '16px',
+      }}>
+        <div>
+          <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--text-muted)', textTransform: 'uppercase', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>Total Inventory Value</p>
+          <p style={{ fontSize: '30px', fontWeight: '700', color: 'var(--accent-green)', fontFamily: 'IBM Plex Mono, monospace', letterSpacing: '-1px' }}>
+            Rs.{stockStats.totalValue.toLocaleString()}
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: '32px', flexWrap: 'wrap' }}>
+          <div style={{ textAlign: 'right' }}>
+            <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--text-muted)', textTransform: 'uppercase', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>Zakat (2.5%)</p>
+            <p style={{ fontSize: '22px', fontWeight: '700', color: 'var(--accent-yellow)', fontFamily: 'IBM Plex Mono, monospace' }}>
+              Rs.{(stockStats.totalValue * 0.025).toLocaleString()}
+            </p>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--text-muted)', textTransform: 'uppercase', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>Total Products</p>
+            <p style={{ fontSize: '22px', fontWeight: '700', color: 'var(--accent-blue)', fontFamily: 'IBM Plex Mono, monospace' }}>
+              {stockStats.total}
+            </p>
+          </div>
         </div>
       </div>
 
@@ -236,8 +292,12 @@ export default function Inventory() {
       {/* Search */}
       <div style={{ position: 'relative', marginBottom: '16px' }}>
         <span style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }}>🔍</span>
-        <input type="text" placeholder="Search by brand, model or part type..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ ...inputStyle, padding: '12px 16px 12px 42px' }} />
-        {searchQuery && <button onClick={() => setSearchQuery('')} style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '16px' }}>✕</button>}
+        <input type="text" placeholder="Search by brand, model or part type..." value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          style={{ ...inputStyle, padding: '12px 16px 12px 42px' }} />
+        {searchQuery && (
+          <button onClick={() => setSearchQuery('')} style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '16px' }}>✕</button>
+        )}
       </div>
 
       {/* Desktop Table */}
@@ -262,20 +322,29 @@ export default function Inventory() {
                 <tr key={product.id} style={{ borderBottom: i < filteredProducts.length - 1 ? '1px solid var(--border)' : 'none' }}>
                   <td style={{ padding: '12px 16px', color: 'var(--text-primary)', fontSize: '13px', fontWeight: '500' }}>{product.name}</td>
                   <td style={{ padding: '12px 16px', color: 'var(--text-secondary)', fontSize: '13px' }}>{product.brand}</td>
-                  <td style={{ padding: '12px 16px' }}><span style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '12px', backgroundColor: 'var(--bg-hover)', color: 'var(--text-secondary)' }}>{product.part_type}</span></td>
                   <td style={{ padding: '12px 16px' }}>
-                    <span style={{ padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600', fontFamily: 'IBM Plex Mono, monospace', backgroundColor: product.quantity > 10 ? 'var(--accent-green-dim)' : product.quantity > 0 ? 'var(--accent-yellow-dim)' : 'var(--accent-red-dim)', color: product.quantity > 10 ? 'var(--accent-green)' : product.quantity > 0 ? 'var(--accent-yellow)' : 'var(--accent-red)' }}>
-                      {product.quantity} pcs
-                    </span>
+                    <span style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '12px', backgroundColor: 'var(--bg-hover)', color: 'var(--text-secondary)' }}>{product.part_type}</span>
+                  </td>
+                  <td style={{ padding: '12px 16px' }}>
+                    <span style={{
+                      padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600', fontFamily: 'IBM Plex Mono, monospace',
+                      backgroundColor: product.quantity > 10 ? 'var(--accent-green-dim)' : product.quantity > 0 ? 'var(--accent-yellow-dim)' : 'var(--accent-red-dim)',
+                      color: product.quantity > 10 ? 'var(--accent-green)' : product.quantity > 0 ? 'var(--accent-yellow)' : 'var(--accent-red)',
+                    }}>{product.quantity} pcs</span>
                   </td>
                   <td style={{ padding: '12px 16px', color: 'var(--text-secondary)', fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{product.purchase_price?.toLocaleString()}</td>
                   <td style={{ padding: '12px 16px', color: 'var(--text-secondary)', fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{product.selling_price?.toLocaleString()}</td>
-                  <td style={{ padding: '12px 16px', fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: profit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>{profit >= 0 ? '+' : ''}Rs.{profit.toLocaleString()}</td>
+                  <td style={{ padding: '12px 16px', fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: profit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {profit >= 0 ? '+' : ''}Rs.{profit.toLocaleString()}
+                  </td>
                   <td style={{ padding: '12px 16px' }}>
                     <div style={{ display: 'flex', gap: '5px' }}>
-                      <button onClick={() => { setSelectedProduct(product); setSoldData({ quantity: '', selling_price: product.selling_price?.toString() || '' }); setShowSoldModal(true) }} style={{ padding: '5px 10px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '6px', color: 'var(--accent-green)', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>Sell</button>
-                      <button onClick={() => openEditModal(product)} style={{ padding: '5px 10px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '6px', color: 'var(--accent-blue)', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>Edit</button>
-                      <button onClick={() => { setSelectedProduct(product); setShowDeleteConfirm(true) }} style={{ padding: '5px 8px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '11px', cursor: 'pointer' }}>✕</button>
+                      <button onClick={() => { setSelectedProduct(product); setSoldData({ quantity: '', selling_price: product.selling_price?.toString() || '' }); setShowSoldModal(true) }}
+                        style={{ padding: '5px 10px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '6px', color: 'var(--accent-green)', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>Sell</button>
+                      <button onClick={() => openEditModal(product)}
+                        style={{ padding: '5px 10px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '6px', color: 'var(--accent-blue)', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>Edit</button>
+                      <button onClick={() => { setSelectedProduct(product); setShowDeleteConfirm(true) }}
+                        style={{ padding: '5px 8px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '11px', cursor: 'pointer' }}>✕</button>
                     </div>
                   </td>
                 </tr>
@@ -301,17 +370,36 @@ export default function Inventory() {
                   <p style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '2px' }}>{product.name}</p>
                   <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{product.brand} • {product.part_type}</p>
                 </div>
-                <span style={{ padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600', fontFamily: 'IBM Plex Mono, monospace', flexShrink: 0, marginLeft: '8px', backgroundColor: product.quantity > 10 ? 'var(--accent-green-dim)' : product.quantity > 0 ? 'var(--accent-yellow-dim)' : 'var(--accent-red-dim)', color: product.quantity > 10 ? 'var(--accent-green)' : product.quantity > 0 ? 'var(--accent-yellow)' : 'var(--accent-red)' }}>{product.quantity} pcs</span>
+                <span style={{
+                  padding: '3px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600',
+                  fontFamily: 'IBM Plex Mono, monospace', flexShrink: 0, marginLeft: '8px',
+                  backgroundColor: product.quantity > 10 ? 'var(--accent-green-dim)' : product.quantity > 0 ? 'var(--accent-yellow-dim)' : 'var(--accent-red-dim)',
+                  color: product.quantity > 10 ? 'var(--accent-green)' : product.quantity > 0 ? 'var(--accent-yellow)' : 'var(--accent-red)',
+                }}>{product.quantity} pcs</span>
               </div>
               <div style={{ display: 'flex', gap: '14px', marginBottom: '12px' }}>
-                <div><p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Buy</p><p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>Rs.{product.purchase_price?.toLocaleString()}</p></div>
-                <div><p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Sell</p><p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>Rs.{product.selling_price?.toLocaleString()}</p></div>
-                <div><p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Profit</p><p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: profit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>{profit >= 0 ? '+' : ''}Rs.{profit.toLocaleString()}</p></div>
+                <div>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Buy</p>
+                  <p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>Rs.{product.purchase_price?.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Sell</p>
+                  <p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--text-secondary)' }}>Rs.{product.selling_price?.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '2px' }}>Profit</p>
+                  <p style={{ fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: profit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {profit >= 0 ? '+' : ''}Rs.{profit.toLocaleString()}
+                  </p>
+                </div>
               </div>
               <div style={{ display: 'flex', gap: '8px' }}>
-                <button onClick={() => { setSelectedProduct(product); setSoldData({ quantity: '', selling_price: product.selling_price?.toString() || '' }); setShowSoldModal(true) }} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '6px', color: 'var(--accent-green)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Sell</button>
-                <button onClick={() => openEditModal(product)} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '6px', color: 'var(--accent-blue)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Edit</button>
-                <button onClick={() => { setSelectedProduct(product); setShowDeleteConfirm(true) }} style={{ padding: '8px 12px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer' }}>✕</button>
+                <button onClick={() => { setSelectedProduct(product); setSoldData({ quantity: '', selling_price: product.selling_price?.toString() || '' }); setShowSoldModal(true) }}
+                  style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '6px', color: 'var(--accent-green)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Sell</button>
+                <button onClick={() => openEditModal(product)}
+                  style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '6px', color: 'var(--accent-blue)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Edit</button>
+                <button onClick={() => { setSelectedProduct(product); setShowDeleteConfirm(true) }}
+                  style={{ padding: '8px 12px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer' }}>✕</button>
               </div>
             </div>
           )
@@ -322,13 +410,13 @@ export default function Inventory() {
       {showAddModal && (
         <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '16px' }}>
           <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '16px', width: '100%', maxWidth: '560px', maxHeight: '92vh', overflowY: 'auto' }}>
-            {/* Modal Header */}
             <div style={{ padding: '22px 28px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'sticky', top: 0, backgroundColor: 'var(--bg-card)', zIndex: 1 }}>
               <div>
                 <p style={{ fontSize: '11px', letterSpacing: '2px', color: 'var(--accent-green)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '4px' }}>INVENTORY</p>
                 <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)' }}>Add New Product</h2>
               </div>
-              <button onClick={() => { setShowAddModal(false); setForm(emptyForm); setModelSearch('') }} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-muted)', cursor: 'pointer', padding: '6px 12px', fontSize: '14px' }}>✕</button>
+              <button onClick={() => { setShowAddModal(false); setForm(emptyForm); setModelSearch('') }}
+                style={{ background: 'none', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-muted)', cursor: 'pointer', padding: '6px 12px', fontSize: '14px' }}>✕</button>
             </div>
 
             <div style={{ padding: '24px 28px' }}>
@@ -401,7 +489,6 @@ export default function Inventory() {
                     </div>
                   </div>
 
-                  {/* Profit Preview */}
                   {profitPreview && (
                     <div style={{ backgroundColor: profitPreview.profitPerPiece >= 0 ? 'var(--accent-green-dim)' : 'var(--accent-red-dim)', border: `1px solid ${profitPreview.profitPerPiece >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}`, borderRadius: '8px', padding: '14px 16px', display: 'flex', gap: '24px' }}>
                       {[
@@ -431,7 +518,8 @@ export default function Inventory() {
               )}
 
               <div style={{ display: 'flex', gap: '10px' }}>
-                <button onClick={() => { setShowAddModal(false); setForm(emptyForm); setModelSearch('') }} style={{ flex: 1, padding: '12px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+                <button onClick={() => { setShowAddModal(false); setForm(emptyForm); setModelSearch('') }}
+                  style={{ flex: 1, padding: '12px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
                 <button onClick={addProduct} disabled={saving || !isFormValid}
                   style={{ flex: 2, padding: '12px', backgroundColor: isFormValid ? 'var(--accent-green-dim)' : 'var(--bg-hover)', border: `1px solid ${isFormValid ? 'var(--accent-green)' : 'var(--border)'}`, borderRadius: '8px', color: isFormValid ? 'var(--accent-green)' : 'var(--text-muted)', fontSize: '14px', fontWeight: '600', cursor: isFormValid ? 'pointer' : 'not-allowed' }}>
                   {saving ? 'Saving...' : '✓ Add to Inventory'}
@@ -450,28 +538,46 @@ export default function Inventory() {
             <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '4px' }}>Edit Product</h2>
             <p style={{ color: 'var(--text-muted)', fontSize: '12px', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '24px' }}>{selectedProduct.name}</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div><label style={labelStyle}>Brand</label>
+              <div>
+                <label style={labelStyle}>Brand</label>
                 <select value={editForm.brand} onChange={(e) => setEditForm({ ...editForm, brand: e.target.value })} style={inputStyle}>
                   <option value="">Select brand</option>
                   {uniqueBrands.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
                 </select>
               </div>
-              <div><label style={labelStyle}>Model</label><input type="text" value={editForm.model} onChange={(e) => setEditForm({ ...editForm, model: e.target.value })} style={inputStyle} /></div>
-              <div><label style={labelStyle}>Part Type</label>
+              <div>
+                <label style={labelStyle}>Model</label>
+                <input type="text" value={editForm.model} onChange={(e) => setEditForm({ ...editForm, model: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <label style={labelStyle}>Part Type</label>
                 <select value={editForm.part_type} onChange={(e) => setEditForm({ ...editForm, part_type: e.target.value })} style={inputStyle}>
                   <option value="">Select part</option>
                   {partTypes.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
                 </select>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' }}>
-                <div><label style={labelStyle}>Buy Price</label><input type="number" value={editForm.purchase_price} onChange={(e) => setEditForm({ ...editForm, purchase_price: e.target.value })} style={inputStyle} /></div>
-                <div><label style={labelStyle}>Sell Price</label><input type="number" value={editForm.selling_price} onChange={(e) => setEditForm({ ...editForm, selling_price: e.target.value })} style={inputStyle} /></div>
-                <div><label style={labelStyle}>Quantity</label><input type="number" value={editForm.quantity} onChange={(e) => setEditForm({ ...editForm, quantity: e.target.value })} style={inputStyle} /></div>
+                <div>
+                  <label style={labelStyle}>Buy Price</label>
+                  <input type="number" value={editForm.purchase_price} onChange={(e) => setEditForm({ ...editForm, purchase_price: e.target.value })} style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Sell Price</label>
+                  <input type="number" value={editForm.selling_price} onChange={(e) => setEditForm({ ...editForm, selling_price: e.target.value })} style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Quantity</label>
+                  <input type="number" value={editForm.quantity} onChange={(e) => setEditForm({ ...editForm, quantity: e.target.value })} style={inputStyle} />
+                </div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
-              <button onClick={() => { setShowEditModal(false); setSelectedProduct(null) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
-              <button onClick={updateProduct} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '8px', color: 'var(--accent-blue)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Save Changes ✓'}</button>
+              <button onClick={() => { setShowEditModal(false); setSelectedProduct(null) }}
+                style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={updateProduct} disabled={saving}
+                style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)', borderRadius: '8px', color: 'var(--accent-blue)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>
+                {saving ? 'Saving...' : 'Save Changes ✓'}
+              </button>
             </div>
           </div>
         </div>
@@ -486,8 +592,12 @@ export default function Inventory() {
             <p style={{ fontSize: '13px', color: 'var(--accent-red)', fontFamily: 'IBM Plex Mono, monospace', marginBottom: '6px' }}>{selectedProduct.name}</p>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '24px' }}>This action cannot be undone.</p>
             <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => { setShowDeleteConfirm(false); setSelectedProduct(null) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
-              <button onClick={deleteProduct} disabled={deleting} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '8px', color: 'var(--accent-red)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{deleting ? 'Deleting...' : 'Yes, Delete'}</button>
+              <button onClick={() => { setShowDeleteConfirm(false); setSelectedProduct(null) }}
+                style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={deleteProduct} disabled={deleting}
+                style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-red-dim)', border: '1px solid var(--accent-red)', borderRadius: '8px', color: 'var(--accent-red)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>
+                {deleting ? 'Deleting...' : 'Yes, Delete'}
+              </button>
             </div>
           </div>
         </div>
@@ -503,29 +613,39 @@ export default function Inventory() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div>
                 <label style={labelStyle}>Quantity</label>
-                <input type="number" placeholder="How many pieces?" value={soldData.quantity} onChange={(e) => setSoldData({ ...soldData, quantity: e.target.value })} style={inputStyle} />
+                <input type="number" placeholder="How many pieces?" value={soldData.quantity}
+                  onChange={(e) => setSoldData({ ...soldData, quantity: e.target.value })} style={inputStyle} />
                 <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px', fontFamily: 'IBM Plex Mono, monospace' }}>Available: {selectedProduct.quantity} pcs</p>
               </div>
               <div>
                 <label style={labelStyle}>Selling Price (Rs.)</label>
-                <input type="number" placeholder="Enter selling price..." value={soldData.selling_price} onChange={(e) => setSoldData({ ...soldData, selling_price: e.target.value })} style={inputStyle} />
+                <input type="number" placeholder="Enter selling price..." value={soldData.selling_price}
+                  onChange={(e) => setSoldData({ ...soldData, selling_price: e.target.value })} style={inputStyle} />
               </div>
               {soldData.quantity && soldData.selling_price && (
                 <div style={{ backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', padding: '14px 16px', display: 'flex', justifyContent: 'space-between' }}>
                   <div>
                     <p style={{ color: 'var(--text-muted)', fontSize: '11px', marginBottom: '4px' }}>TOTAL AMOUNT</p>
-                    <p style={{ color: 'var(--accent-green)', fontSize: '20px', fontWeight: '700', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{(parseInt(soldData.quantity) * parseFloat(soldData.selling_price)).toLocaleString()}</p>
+                    <p style={{ color: 'var(--accent-green)', fontSize: '20px', fontWeight: '700', fontFamily: 'IBM Plex Mono, monospace' }}>
+                      Rs.{(parseInt(soldData.quantity) * parseFloat(soldData.selling_price)).toLocaleString()}
+                    </p>
                   </div>
                   <div style={{ textAlign: 'right' }}>
                     <p style={{ color: 'var(--text-muted)', fontSize: '11px', marginBottom: '4px' }}>PROFIT</p>
-                    <p style={{ color: 'var(--accent-yellow)', fontSize: '20px', fontWeight: '700', fontFamily: 'IBM Plex Mono, monospace' }}>Rs.{((parseFloat(soldData.selling_price) - selectedProduct.purchase_price) * parseInt(soldData.quantity)).toLocaleString()}</p>
+                    <p style={{ color: 'var(--accent-yellow)', fontSize: '20px', fontWeight: '700', fontFamily: 'IBM Plex Mono, monospace' }}>
+                      Rs.{((parseFloat(soldData.selling_price) - selectedProduct.purchase_price) * parseInt(soldData.quantity)).toLocaleString()}
+                    </p>
                   </div>
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
-              <button onClick={() => { setShowSoldModal(false); setSelectedProduct(null) }} style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
-              <button onClick={markAsSold} disabled={saving} style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>{saving ? 'Saving...' : 'Confirm Sale ✓'}</button>
+              <button onClick={() => { setShowSoldModal(false); setSelectedProduct(null) }}
+                style={{ flex: 1, padding: '11px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '14px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={markAsSold} disabled={saving}
+                style={{ flex: 1, padding: '11px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '14px', fontWeight: '600', cursor: 'pointer' }}>
+                {saving ? 'Saving...' : 'Confirm Sale ✓'}
+              </button>
             </div>
           </div>
         </div>
