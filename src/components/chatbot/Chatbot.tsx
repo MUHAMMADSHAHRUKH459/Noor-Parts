@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -80,37 +80,31 @@ interface AIResult {
   message: string
 }
 
-// ─── Speech Recognition Types ─────────────────────────────────────────────────
-
 interface SpeechRecognitionEvent {
-  results: SpeechRecognitionResultList
-}
-
-interface SpeechRecognitionResultList {
-  0: SpeechRecognitionResult
-}
-
-interface SpeechRecognitionResult {
-  0: SpeechRecognitionAlternative
-}
-
-interface SpeechRecognitionAlternative {
-  transcript: string
+  results: { 0: { 0: { transcript: string } } }
 }
 
 interface SpeechRecognitionInstance {
   lang: string
   interimResults: boolean
   maxAlternatives: number
-  onstart: () => void
-  onend: () => void
-  onerror: () => void
-  onresult: (event: SpeechRecognitionEvent) => void
+  onstart: (() => void) | null
+  onend: (() => void) | null
+  onerror: (() => void) | null
+  onresult: ((event: SpeechRecognitionEvent) => void) | null
   start: () => void
   stop: () => void
 }
 
-// ─── Zakat ────────────────────────────────────────────────────────────────────
+// ─── ID Counter (outside component — no re-render issues) ────────────────────
+
+let msgCounter = 0
+function nextId(): string {
+  msgCounter += 1
+  return `msg_${msgCounter}`
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const NISAB_VALUE = 87.48 * 21000
 const ZAKAT_RATE = 0.025
@@ -121,8 +115,7 @@ function needsLiveData(message: string): boolean {
   const keywords = ['stock', 'kitna', 'bacha', 'baki', 'zakat', 'profit', 'revenue',
     'aaj', 'today', 'kamai', 'total', 'available', 'khatam', 'low',
     'inventory', 'value', 'kitne', 'check', 'batao', 'list']
-  const lower = message.toLowerCase()
-  return keywords.some(k => lower.includes(k))
+  return keywords.some(k => message.toLowerCase().includes(k))
 }
 
 async function fetchLiveContext(): Promise<string> {
@@ -134,27 +127,27 @@ async function fetchLiveContext(): Promise<string> {
         .order('sold_at', { ascending: false }).limit(50),
     ])
     const pl = (products as ProductRow[]) || []
-    const sl = sales || []
+    const sl = (sales as {
+      total_amount?: number
+      quantity?: number
+      sold_at: string
+      product?: { purchase_price?: number }
+    }[]) || []
 
-    const totalInventoryValue = pl.reduce((s, p) => s + ((p.purchase_price || 0) * (p.quantity || 0)), 0)
+    const totalInventoryValue = pl.reduce((s, p) => s + (p.purchase_price || 0) * (p.quantity || 0), 0)
     const zakatApplicable = totalInventoryValue >= NISAB_VALUE
     const zakatAmount = zakatApplicable ? totalInventoryValue * ZAKAT_RATE : 0
-    const totalRevenue = sl.reduce((s: number, x: { total_amount?: number }) => s + (x.total_amount || 0), 0)
-    const totalCost = sl.reduce((s: number, x: { quantity?: number; product?: { purchase_price?: number } }) =>
-      s + ((x.product?.purchase_price || 0) * (x.quantity || 0)), 0)
-    const todaySales = sl.filter((s: { sold_at: string }) =>
-      new Date(s.sold_at).toDateString() === new Date().toDateString())
+    const totalRevenue = sl.reduce((s, x) => s + (x.total_amount || 0), 0)
+    const totalCost = sl.reduce((s, x) => s + (x.product?.purchase_price || 0) * (x.quantity || 0), 0)
+    const todayCount = sl.filter(s => new Date(s.sold_at).toDateString() === new Date().toDateString()).length
     const outOfStock = pl.filter(p => p.quantity === 0).map(p => p.name).join(', ') || 'Koi nahi'
-    const lowStock = pl.filter(p => p.quantity > 0 && p.quantity <= 5)
-      .map(p => `${p.name}(${p.quantity})`).join(', ') || 'Koi nahi'
-    const allProducts = pl
-      .map(p => `${p.name}: ${p.quantity}pcs buy=Rs${p.purchase_price} sell=Rs${p.selling_price}`)
-      .join('\n')
+    const lowStock = pl.filter(p => p.quantity > 0 && p.quantity <= 5).map(p => `${p.name}(${p.quantity})`).join(', ') || 'Koi nahi'
+    const allProducts = pl.map(p => `${p.name}: ${p.quantity}pcs buy=Rs${p.purchase_price} sell=Rs${p.selling_price}`).join('\n')
 
     return `=== LIVE SHOP DATA ===
 INVENTORY: ${pl.length} products, Value=Rs${totalInventoryValue.toLocaleString()}
 SALES: ${sl.length} total, Revenue=Rs${totalRevenue.toLocaleString()}, Profit=Rs${(totalRevenue - totalCost).toLocaleString()}
-TODAY: ${todaySales.length} sales
+TODAY: ${todayCount} sales
 ZAKAT: ${zakatApplicable ? 'Wajib' : 'Nahi'}, Amount=Rs${zakatAmount.toLocaleString()}
 OUT OF STOCK: ${outOfStock}
 LOW STOCK: ${lowStock}
@@ -166,7 +159,7 @@ ALL PRODUCTS:\n${allProducts}
 // ─── Invoice Generator ────────────────────────────────────────────────────────
 
 function generateInvoicePDF(invoice: InvoiceData): void {
-  const rows = invoice.sales.map((s: InvoiceSale, i: number) => `
+  const rows = invoice.sales.map((s, i) => `
     <tr style="background:${i % 2 === 0 ? '#f9f9f9' : '#fff'}">
       <td style="padding:10px 14px;border-bottom:1px solid #eee;color:#333">${s.date}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #eee;color:#333;text-align:center">${s.quantity} pcs</td>
@@ -175,78 +168,44 @@ function generateInvoicePDF(invoice: InvoiceData): void {
     </tr>`).join('')
 
   const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Invoice - ${invoice.product_name}</title>
-  <style>
-    * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family: 'Segoe UI', Arial, sans-serif; background:#fff; color:#333; }
-    .page { max-width:700px; margin:0 auto; padding:40px; }
-    @media print { .no-print { display:none; } .page { padding:20px; } }
-  </style>
-</head>
-<body>
-<div class="page">
+<html><head><meta charset="UTF-8"><title>Invoice - ${invoice.product_name}</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#333}.page{max-width:700px;margin:0 auto;padding:40px}@media print{.no-print{display:none}.page{padding:20px}}</style>
+</head><body><div class="page">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:32px;padding-bottom:24px;border-bottom:2px solid #111">
-    <div>
-      <h1 style="font-size:28px;font-weight:900;color:#111;letter-spacing:-1px">Noor Parts</h1>
-      <p style="font-size:13px;color:#888;margin-top:4px">Mobile Parts Shop</p>
-    </div>
-    <div style="text-align:right">
-      <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px">Invoice</p>
-      <p style="font-size:13px;color:#333;margin-top:4px">${new Date().toLocaleDateString('en-PK', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
-    </div>
+    <div><h1 style="font-size:28px;font-weight:900;color:#111;letter-spacing:-1px">Noor Parts</h1><p style="font-size:13px;color:#888;margin-top:4px">Mobile Parts Shop</p></div>
+    <div style="text-align:right"><p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px">Invoice</p><p style="font-size:13px;color:#333;margin-top:4px">${new Date().toLocaleDateString('en-PK', { year: 'numeric', month: 'long', day: 'numeric' })}</p></div>
   </div>
-
   <div style="background:#f4f4f4;border-radius:10px;padding:16px 20px;margin-bottom:28px">
     <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Product</p>
     <p style="font-size:20px;font-weight:700;color:#111">${invoice.product_name}</p>
   </div>
-
   <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
-    <thead>
-      <tr style="background:#111">
-        <th style="padding:12px 14px;text-align:left;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Date</th>
-        <th style="padding:12px 14px;text-align:center;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Qty</th>
-        <th style="padding:12px 14px;text-align:right;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Price/pc</th>
-        <th style="padding:12px 14px;text-align:right;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Total</th>
-      </tr>
-    </thead>
+    <thead><tr style="background:#111">
+      <th style="padding:12px 14px;text-align:left;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Date</th>
+      <th style="padding:12px 14px;text-align:center;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Qty</th>
+      <th style="padding:12px 14px;text-align:right;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Price/pc</th>
+      <th style="padding:12px 14px;text-align:right;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px">Total</th>
+    </tr></thead>
     <tbody>${rows}</tbody>
   </table>
-
   <div style="display:flex;justify-content:flex-end">
     <div style="background:#111;color:#fff;border-radius:10px;padding:20px 28px;min-width:240px">
-      <div style="display:flex;justify-content:space-between;margin-bottom:10px">
-        <span style="font-size:13px;color:#aaa">Total Pieces</span>
-        <span style="font-size:13px;font-weight:700">${invoice.total_qty} pcs</span>
-      </div>
-      <div style="border-top:1px solid #444;padding-top:12px;display:flex;justify-content:space-between;align-items:center">
-        <span style="font-size:14px;color:#aaa">Grand Total</span>
-        <span style="font-size:22px;font-weight:900;color:#4ade80">Rs.${invoice.grand_total.toLocaleString()}</span>
-      </div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:10px"><span style="font-size:13px;color:#aaa">Total Pieces</span><span style="font-size:13px;font-weight:700">${invoice.total_qty} pcs</span></div>
+      <div style="border-top:1px solid #444;padding-top:12px;display:flex;justify-content:space-between;align-items:center"><span style="font-size:14px;color:#aaa">Grand Total</span><span style="font-size:22px;font-weight:900;color:#4ade80">Rs.${invoice.grand_total.toLocaleString()}</span></div>
     </div>
   </div>
-
   <div style="margin-top:40px;padding-top:20px;border-top:1px solid #eee;text-align:center">
     <p style="font-size:12px;color:#aaa">Noor Parts — Mobile Parts Shop</p>
     <p style="font-size:11px;color:#ccc;margin-top:4px">Generated by Noor Parts AI</p>
   </div>
-
   <div class="no-print" style="margin-top:24px;text-align:center">
     <button onclick="window.print()" style="padding:12px 32px;background:#111;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-right:10px">🖨 Print / Save PDF</button>
     <button onclick="window.close()" style="padding:12px 32px;background:#f4f4f4;color:#333;border:none;border-radius:8px;font-size:14px;cursor:pointer">Close</button>
   </div>
-</div>
-</body>
-</html>`
+</div></body></html>`
 
   const win = window.open('', '_blank')
-  if (win) {
-    win.document.write(html)
-    win.document.close()
-  }
+  if (win) { win.document.write(html); win.document.close() }
 }
 
 // ─── Fetch Invoice Data ───────────────────────────────────────────────────────
@@ -257,24 +216,17 @@ async function fetchInvoiceData(brand: string, model: string, partType: string):
     if (brand) query = query.ilike('brand', `%${brand}%`)
     if (model) query = query.ilike('model', `%${model}%`)
     if (partType) query = query.ilike('part_type', `%${partType}%`)
-
     const { data: products } = await query
     if (!products || products.length === 0) return null
     const product = products[0] as ProductRow
 
-    const { data: sales } = await supabase
-      .from('sales').select('*')
-      .eq('product_id', product.id)
-      .order('sold_at', { ascending: false })
-
+    const { data: sales } = await supabase.from('sales').select('*')
+      .eq('product_id', product.id).order('sold_at', { ascending: false })
     if (!sales || sales.length === 0) return null
 
-    const invoiceSales: InvoiceSale[] = sales.map((s: {
-      sold_at: string
-      quantity: number
-      selling_price: number
-      total_amount: number
-    }) => ({
+    const invoiceSales: InvoiceSale[] = (sales as {
+      sold_at: string; quantity: number; selling_price: number; total_amount: number
+    }[]).map(s => ({
       date: new Date(s.sold_at).toLocaleDateString('en-PK', { year: 'numeric', month: 'short', day: 'numeric' }),
       quantity: s.quantity,
       selling_price: s.selling_price,
@@ -290,7 +242,7 @@ async function fetchInvoiceData(brand: string, model: string, partType: string):
   } catch { return null }
 }
 
-// ─── Smart Product Matcher ────────────────────────────────────────────────────
+// ─── Product Matcher ──────────────────────────────────────────────────────────
 
 async function findMatchingProducts(partType: string, brand?: string, model?: string): Promise<ProductRow[]> {
   let query = supabase.from('products').select('*')
@@ -303,88 +255,92 @@ async function findMatchingProducts(partType: string, brand?: string, model?: st
 
 // ─── System Prompt ────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an AI assistant for a Pakistani mobile parts shop called "Noor Parts".
-Shopkeepers talk casually in Roman Urdu. Understand their casual language.
+const SYSTEM_PROMPT = `You are an AI assistant for a Pakistani mobile parts shop "Noor Parts".
+Shopkeepers talk casually in Roman Urdu or English. Understand their casual language and respond helpfully.
 
-CASUAL LANGUAGE PATTERNS:
-- "100 back cover 500 mein liye" = inventory (part_type=Back Glass, qty=100, purchase_price=500)
-- "50 hot 10 ka back cover sale kiye 800 mein" = sale (model=Hot 10, part_type=Back Glass, qty=50, selling_price=800)
-- "hot 10 back cover ki invoice" = invoice request
-- brand/model may be missing — leave as empty string ""
+CASUAL PATTERNS:
+- "100 back cover 500 mein liye" = inventory intent
+- "50 hot 10 ka back cover 800 mein sale kiye" = sale intent  
+- "hot 10 back cover ki invoice" = invoice intent
+- "total profit kitna hai" = query intent
 
 Part type mappings:
-- "back cover/back glass/peeche ka cover" = Back Glass
-- "screen/display/lcd" = Display
-- "battery/batt" = Battery
-- "speaker/awaz" = Speaker
-- "charging port/charger port/pin" = Charging Port
-- "fingerprint/finger" = Fingerprint
-- "camera lens/camera" = Camera Lens
-- "power button/on button" = Power Button
-- "volume button" = Volume Button
-- "ribbon/flex" = Ribbon
-- "sim tray/sim slot" = Sim Tray
+- back cover/back glass/peeche ka cover = Back Glass
+- screen/display/lcd = Display
+- battery/batt = Battery
+- speaker/awaz = Speaker
+- charging port/pin = Charging Port
+- fingerprint/finger = Fingerprint
+- camera lens/camera = Camera Lens
+- power button/on button = Power Button
+- volume button = Volume Button
+- ribbon/flex = Ribbon
+- sim tray/sim slot = Sim Tray
 
-Respond ONLY with valid JSON. No markdown, no explanation.
+IMPORTANT: You MUST respond ONLY with a JSON object. No text before or after JSON. No markdown. No explanation.
 
-ADD inventory: {"intent":"inventory","brand":"","model":"","part_type":"","quantity":0,"purchase_price":0,"selling_price":0,"message":"Roman Urdu confirmation"}
-RECORD sale: {"intent":"sale","brand":"","model":"","part_type":"","quantity":0,"selling_price":0,"message":"Roman Urdu confirmation"}
-INVOICE: {"intent":"invoice","brand":"","model":"","part_type":"","message":"Roman Urdu — invoice bana raha hun"}
-QUERY: {"intent":"query","message":"Roman Urdu answer using live data"}
-CHAT: {"intent":"chat","message":"Roman Urdu response"}
+For inventory: {"intent":"inventory","brand":"","model":"","part_type":"","quantity":0,"purchase_price":0,"selling_price":0,"message":"Roman Urdu confirmation"}
+For sale: {"intent":"sale","brand":"","model":"","part_type":"","quantity":0,"selling_price":0,"message":"Roman Urdu confirmation"}
+For invoice: {"intent":"invoice","brand":"","model":"","part_type":"","message":"Invoice bana raha hun..."}
+For stock/profit/zakat/analytics questions: {"intent":"query","message":"Detailed Roman Urdu answer using the live data provided"}
+For general chat: {"intent":"chat","message":"Roman Urdu response"}
 
 Rules:
-- brand/model can be empty string if not mentioned
-- part_type MUST be mapped to standard name
-- quantity and prices must be numbers
-- message always in Roman Urdu`
+- brand/model can be empty string "" if not mentioned
+- part_type MUST be mapped to standard name from the list above
+- quantity and prices must be numbers not strings
+- message is ALWAYS in Roman Urdu
+- For query intent: use ALL the live data provided to give accurate detailed answer`
 
 // ─── Call AI ──────────────────────────────────────────────────────────────────
 
-async function callAI(userMessage: string, conversationHistory: Message[]): Promise<AIResult> {
-  const historyText = conversationHistory.slice(-4)
-    .map(m => `${m.role === 'user' ? 'User' : 'Bot'}: ${m.text}`).join('\n')
+async function callAI(userMessage: string, history: Message[]): Promise<AIResult> {
+  const historyText = history.slice(-4)
+    .map(m => `${m.role === 'user' ? 'User' : 'Bot'}: ${m.text.slice(0, 100)}`).join('\n')
 
   const liveData = needsLiveData(userMessage) ? await fetchLiveContext() : ''
 
   const prompt = `${SYSTEM_PROMPT}
-${liveData ? `\n${liveData}\n` : ''}
-${historyText ? `Previous:\n${historyText}\n` : ''}
-User: ${userMessage}
-JSON:`
+${liveData ? `\nLIVE DATA:\n${liveData}\n` : ''}
+${historyText ? `HISTORY:\n${historyText}\n` : ''}
+User says: "${userMessage}"
+
+Respond with JSON only:`
 
   const response = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt }),
   })
-
   if (!response.ok) throw new Error(`API error: ${response.status}`)
 
   const data = await response.json()
   const text = (data.choices?.[0]?.message?.content as string) || '{}'
   const clean = text.replace(/```json|```/g, '').trim()
-  return JSON.parse(clean) as AIResult
+
+  // Extract JSON if there's text around it
+  const jsonMatch = clean.match(/\{[\s\S]*\}/)
+  if (!jsonMatch) throw new Error('Invalid JSON response')
+
+  return JSON.parse(jsonMatch[0]) as AIResult
 }
 
-// ─── Supabase: Save Inventory ─────────────────────────────────────────────────
+// ─── Supabase Actions ─────────────────────────────────────────────────────────
 
 async function saveInventory(data: InventoryData): Promise<string> {
   const productName = `${data.brand} ${data.model} ${data.part_type}`.trim()
-
   const { data: existing } = await supabase.from('products').select('*')
     .eq('brand', data.brand).eq('model', data.model).eq('part_type', data.part_type).single()
+  const ex = existing as ProductRow | null
 
-  const existingRow = existing as ProductRow | null
-
-  if (existingRow) {
+  if (ex) {
     const { error } = await supabase.from('products').update({
-      quantity: existingRow.quantity + data.quantity,
-      purchase_price: data.purchase_price || existingRow.purchase_price,
-      selling_price: data.selling_price || existingRow.selling_price,
-    }).eq('id', existingRow.id)
+      quantity: ex.quantity + data.quantity,
+      purchase_price: data.purchase_price || ex.purchase_price,
+      selling_price: data.selling_price || ex.selling_price,
+    }).eq('id', ex.id)
     if (error) throw error
-    return `✓ ${productName}\n${data.quantity} piece add ho gaye. Total: ${existingRow.quantity + data.quantity} pcs`
+    return `✓ ${productName}\n${data.quantity} piece add ho gaye. Total: ${ex.quantity + data.quantity} pcs`
   } else {
     const { error } = await supabase.from('products').insert([{
       name: productName, brand: data.brand, model: data.model, part_type: data.part_type,
@@ -396,8 +352,6 @@ async function saveInventory(data: InventoryData): Promise<string> {
   }
 }
 
-// ─── Supabase: Save Sale ──────────────────────────────────────────────────────
-
 async function saveSale(data: SaleData): Promise<string> {
   let product: ProductRow | null = null
 
@@ -405,46 +359,43 @@ async function saveSale(data: SaleData): Promise<string> {
     const { data: p } = await supabase.from('products').select('*').eq('id', data.product_id).single()
     product = p as ProductRow | null
   } else {
-    const { data: products } = await supabase.from('products').select('*')
-      .ilike('brand', `%${data.brand}%`)
-      .ilike('model', `%${data.model}%`)
-      .ilike('part_type', data.part_type)
-      .gt('quantity', 0)
-    product = (products as ProductRow[])?.[0] || null
+    const { data: found } = await supabase.from('products').select('*')
+      .ilike('brand', `%${data.brand}%`).ilike('model', `%${data.model}%`)
+      .ilike('part_type', data.part_type).gt('quantity', 0)
+    product = (found as ProductRow[])?.[0] || null
 
-    if (!product && data.part_type) {
+    if (!product) {
       const { data: broad } = await supabase.from('products').select('*')
         .ilike('part_type', `%${data.part_type}%`).gt('quantity', 0)
       product = (broad as ProductRow[])?.[0] || null
     }
   }
 
-  if (!product) return `✗ Product nahi mila ya stock khatam hai. Pehle inventory mein add karein.`
+  if (!product) return `✗ Product nahi mila ya stock khatam. Pehle inventory mein add karein.`
   if (product.quantity < data.quantity) return `✗ Sirf ${product.quantity} pcs available hain.`
 
   const total_amount = data.quantity * data.selling_price
-
   const { error: saleErr } = await supabase.from('sales').insert([{
     product_id: product.id, quantity: data.quantity,
     selling_price: data.selling_price, total_amount,
   }])
   if (saleErr) throw saleErr
 
-  await supabase.from('products')
-    .update({ quantity: product.quantity - data.quantity })
-    .eq('id', product.id)
-
+  await supabase.from('products').update({ quantity: product.quantity - data.quantity }).eq('id', product.id)
   return `✓ Sale record ho gaya!\n📦 ${product.name}\n🔢 ${data.quantity} pcs @ Rs.${data.selling_price}\n💰 Total: Rs.${total_amount.toLocaleString()}`
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
+const INITIAL_MESSAGES: Message[] = [{
+  id: 'msg_0',
+  role: 'bot',
+  text: 'Assalam o Alaikum! Main Noor Parts ka AI assistant hun. 🤖\n\nAap mujhse aise baat kar sakte hain:\n\n📦 "100 back cover 500 mein liye"\n💸 "50 hot 10 ka back cover 800 mein sale kiye"\n🧾 "Hot 10 back cover ki invoice banao"\n📊 "Total profit kitna hai?"\n🕌 "Zakat kitni banti hai?"',
+}]
+
 export default function Chatbot() {
   const [isOpen, setIsOpen] = useState(false)
-  const [messages, setMessages] = useState<Message[]>([{
-    id: '1', role: 'bot',
-    text: 'Assalam o Alaikum! Main Noor Parts ka AI assistant hun. 🤖\n\nAap mujhse aise baat kar sakte hain:\n\n📦 "100 back cover 500 mein liye"\n💸 "50 hot 10 ka back cover 800 mein sale kiye"\n🧾 "Hot 10 back cover ki invoice banao"\n📊 "Aaj ki sale kitni hai?"\n🕌 "Zakat kitni banti hai?"',
-  }])
+  const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [pendingAction, setPendingAction] = useState<{ action: PendingAction; botMsgId: string } | null>(null)
@@ -452,10 +403,19 @@ export default function Chatbot() {
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const sendingRef = useRef(false)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // ── addMessage — uses counter, no impure functions ────────────────────────
+
+  const addMessage = useCallback((msg: Omit<Message, 'id'>): string => {
+    const id = nextId()
+    setMessages(prev => [...prev, { ...msg, id }])
+    return id
+  }, [])
 
   // ── Voice ─────────────────────────────────────────────────────────────────
 
@@ -464,14 +424,12 @@ export default function Chatbot() {
       (window as Window & { SpeechRecognition?: new () => SpeechRecognitionInstance }).SpeechRecognition ||
       (window as Window & { webkitSpeechRecognition?: new () => SpeechRecognitionInstance }).webkitSpeechRecognition
     )
-
     if (!SpeechRecognitionClass) {
-      addMessage({ role: 'bot', text: '⚠ Voice input ke liye Chrome browser use karein.' })
+      addMessage({ role: 'bot', text: '⚠ Voice ke liye Chrome browser use karein.' })
       return
     }
-
     const recognition = new SpeechRecognitionClass()
-    recognition.lang = 'en-US'  // Roman Urdu ke liye en-US best hai
+    recognition.lang = 'en-US'
     recognition.interimResults = false
     recognition.maxAlternatives = 1
     recognition.onstart = () => setIsListening(true)
@@ -481,7 +439,6 @@ export default function Chatbot() {
       const transcript = event.results[0][0].transcript
       handleSendText(transcript)
     }
-
     recognition.start()
     recognitionRef.current = recognition
   }
@@ -491,86 +448,55 @@ export default function Chatbot() {
     setIsListening(false)
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  function addMessage(msg: Omit<Message, 'id'>): string {
-    const newMsg = { ...msg, id: Date.now().toString() + Math.random() }
-    setMessages(prev => [...prev, newMsg])
-    return newMsg.id
-  }
-
-  // ── Send ──────────────────────────────────────────────────────────────────
-
-  async function handleSend() {
-    const text = input.trim()
-    if (!text || loading) return
-    setInput('')
-    await handleSendText(text)
-  }
+  // ── Core send logic ───────────────────────────────────────────────────────
 
   async function handleSendText(text: string) {
-    if (!text || loading) return
-    addMessage({ role: 'user', text })
+    if (!text.trim() || loading || sendingRef.current) return
+    sendingRef.current = true
     setLoading(true)
+    setInput('')
+
+    addMessage({ role: 'user', text })
 
     try {
       const result = await callAI(text, messages)
 
       if (result.intent === 'invoice') {
-        addMessage({ role: 'bot', text: result.message })
-        const invoiceData = await fetchInvoiceData(
-          result.brand || '', result.model || '', result.part_type || ''
-        )
+        addMessage({ role: 'bot', text: result.message || 'Invoice bana raha hun...' })
+        const invoiceData = await fetchInvoiceData(result.brand || '', result.model || '', result.part_type || '')
         if (!invoiceData) {
           addMessage({ role: 'bot', text: '✗ Is product ki koi sale nahi mili database mein.' })
         } else {
           addMessage({
             role: 'bot',
-            text: `✓ Invoice ready hai!\n📦 ${invoiceData.product_name}\n🔢 Total: ${invoiceData.total_qty} pcs\n💰 Grand Total: Rs.${invoiceData.grand_total.toLocaleString()}`,
+            text: `✓ Invoice ready!\n📦 ${invoiceData.product_name}\n🔢 ${invoiceData.total_qty} pcs\n💰 Grand Total: Rs.${invoiceData.grand_total.toLocaleString()}`,
             invoice: invoiceData,
           })
         }
 
       } else if (result.intent === 'inventory') {
-        if ((!result.brand || !result.model) && result.part_type) {
+        const hasBrandModel = result.brand && result.model
+        if (!hasBrandModel && result.part_type) {
           const matches = await findMatchingProducts(result.part_type, result.brand, result.model)
           if (matches.length === 1) {
             const action: PendingAction = {
               type: 'inventory',
-              data: {
-                brand: matches[0].brand, model: matches[0].model,
-                part_type: result.part_type, quantity: result.quantity || 0,
-                purchase_price: result.purchase_price || 0, selling_price: result.selling_price || 0,
-              } as InventoryData,
+              data: { brand: matches[0].brand, model: matches[0].model, part_type: result.part_type, quantity: result.quantity || 0, purchase_price: result.purchase_price || 0, selling_price: result.selling_price || 0 } as InventoryData,
             }
-            const msgId = addMessage({
-              role: 'bot',
-              text: `${result.message}\n\n🔍 Match mila: ${matches[0].name}\nConfirm karein?`,
-              action,
-            })
+            const msgId = addMessage({ role: 'bot', text: `${result.message}\n\n🔍 Match: ${matches[0].name}\nConfirm karein?`, action })
             setPendingAction({ action, botMsgId: msgId })
           } else if (matches.length > 1) {
             const list = matches.slice(0, 5).map((p, i) => `${i + 1}. ${p.name} (${p.quantity} pcs)`).join('\n')
             const action: PendingAction = {
               type: 'confirm_product',
-              data: {
-                products: matches.slice(0, 5),
-                original_intent: 'inventory',
-                quantity: result.quantity || 0,
-                price: result.purchase_price || 0,
-                selling_price: result.selling_price || 0,
-              } as ConfirmData,
+              data: { products: matches.slice(0, 5), original_intent: 'inventory', quantity: result.quantity || 0, price: result.purchase_price || 0, selling_price: result.selling_price || 0 } as ConfirmData,
             }
-            const msgId = addMessage({ role: 'bot', text: `Konsa product? Number dabayein:\n\n${list}`, action })
+            const msgId = addMessage({ role: 'bot', text: `Konsa product? Button dabayein:\n\n${list}`, action })
             setPendingAction({ action, botMsgId: msgId })
           } else {
             const action: PendingAction = {
               type: 'inventory',
-              data: {
-                brand: result.brand || '', model: result.model || '',
-                part_type: result.part_type, quantity: result.quantity || 0,
-                purchase_price: result.purchase_price || 0, selling_price: result.selling_price || 0,
-              } as InventoryData,
+              data: { brand: result.brand || '', model: result.model || '', part_type: result.part_type, quantity: result.quantity || 0, purchase_price: result.purchase_price || 0, selling_price: result.selling_price || 0 } as InventoryData,
             }
             const msgId = addMessage({ role: 'bot', text: result.message, action })
             setPendingAction({ action, botMsgId: msgId })
@@ -578,46 +504,30 @@ export default function Chatbot() {
         } else {
           const action: PendingAction = {
             type: 'inventory',
-            data: {
-              brand: result.brand || '', model: result.model || '',
-              part_type: result.part_type || '', quantity: result.quantity || 0,
-              purchase_price: result.purchase_price || 0, selling_price: result.selling_price || 0,
-            } as InventoryData,
+            data: { brand: result.brand || '', model: result.model || '', part_type: result.part_type || '', quantity: result.quantity || 0, purchase_price: result.purchase_price || 0, selling_price: result.selling_price || 0 } as InventoryData,
           }
           const msgId = addMessage({ role: 'bot', text: result.message, action })
           setPendingAction({ action, botMsgId: msgId })
         }
 
       } else if (result.intent === 'sale') {
-        if ((!result.brand || !result.model) && result.part_type) {
+        const hasBrandModel = result.brand && result.model
+        if (!hasBrandModel && result.part_type) {
           const matches = await findMatchingProducts(result.part_type, result.brand, result.model)
           if (matches.length === 1) {
             const action: PendingAction = {
               type: 'sale',
-              data: {
-                brand: matches[0].brand, model: matches[0].model,
-                part_type: result.part_type, quantity: result.quantity || 0,
-                selling_price: result.selling_price || 0, product_id: matches[0].id,
-              } as SaleData,
+              data: { brand: matches[0].brand, model: matches[0].model, part_type: result.part_type, quantity: result.quantity || 0, selling_price: result.selling_price || 0, product_id: matches[0].id } as SaleData,
             }
-            const msgId = addMessage({
-              role: 'bot',
-              text: `${result.message}\n\n🔍 Match: ${matches[0].name} (${matches[0].quantity} pcs)\nConfirm karein?`,
-              action,
-            })
+            const msgId = addMessage({ role: 'bot', text: `${result.message}\n\n🔍 Match: ${matches[0].name} (${matches[0].quantity} pcs)\nConfirm karein?`, action })
             setPendingAction({ action, botMsgId: msgId })
           } else if (matches.length > 1) {
             const list = matches.slice(0, 5).map((p, i) => `${i + 1}. ${p.name} (${p.quantity} pcs)`).join('\n')
             const action: PendingAction = {
               type: 'confirm_product',
-              data: {
-                products: matches.slice(0, 5),
-                original_intent: 'sale',
-                quantity: result.quantity || 0,
-                price: result.selling_price || 0,
-              } as ConfirmData,
+              data: { products: matches.slice(0, 5), original_intent: 'sale', quantity: result.quantity || 0, price: result.selling_price || 0 } as ConfirmData,
             }
-            const msgId = addMessage({ role: 'bot', text: `Konsa product? Number dabayein:\n\n${list}`, action })
+            const msgId = addMessage({ role: 'bot', text: `Konsa product? Button dabayein:\n\n${list}`, action })
             setPendingAction({ action, botMsgId: msgId })
           } else {
             addMessage({ role: 'bot', text: `✗ "${result.part_type}" stock mein nahi mila. Pehle inventory mein add karein.` })
@@ -625,40 +535,43 @@ export default function Chatbot() {
         } else {
           const action: PendingAction = {
             type: 'sale',
-            data: {
-              brand: result.brand || '', model: result.model || '',
-              part_type: result.part_type || '', quantity: result.quantity || 0,
-              selling_price: result.selling_price || 0,
-            } as SaleData,
+            data: { brand: result.brand || '', model: result.model || '', part_type: result.part_type || '', quantity: result.quantity || 0, selling_price: result.selling_price || 0 } as SaleData,
           }
           const msgId = addMessage({ role: 'bot', text: result.message, action })
           setPendingAction({ action, botMsgId: msgId })
         }
 
       } else {
+        // query or chat — just show message
         addMessage({ role: 'bot', text: result.message })
       }
+
     } catch (err) {
       console.error(err)
       addMessage({ role: 'bot', text: 'Kuch error aa gayi. Dobara try karein.' })
     } finally {
       setLoading(false)
+      sendingRef.current = false
     }
   }
 
-  // ── Confirm ───────────────────────────────────────────────────────────────
+  async function handleSend() {
+    const text = input.trim()
+    if (!text) return
+    await handleSendText(text)
+  }
+
+  // ── Confirm / Cancel ──────────────────────────────────────────────────────
 
   async function handleConfirm() {
     if (!pendingAction) return
     setLoading(true)
+    const action = pendingAction.action
     setPendingAction(null)
     try {
       let msg = ''
-      if (pendingAction.action.type === 'inventory') {
-        msg = await saveInventory(pendingAction.action.data as InventoryData)
-      } else if (pendingAction.action.type === 'sale') {
-        msg = await saveSale(pendingAction.action.data as SaleData)
-      }
+      if (action.type === 'inventory') msg = await saveInventory(action.data as InventoryData)
+      else if (action.type === 'sale') msg = await saveSale(action.data as SaleData)
       addMessage({ role: 'bot', text: msg })
     } catch {
       addMessage({ role: 'bot', text: 'Save karne mein error. Dobara try karein.' })
@@ -672,23 +585,14 @@ export default function Chatbot() {
     const confirmData = pendingAction.action.data as ConfirmData
     const selected = confirmData.products[index]
     if (!selected) return
-
     setPendingAction(null)
     setLoading(true)
     try {
       let msg = ''
       if (confirmData.original_intent === 'inventory') {
-        msg = await saveInventory({
-          brand: selected.brand, model: selected.model, part_type: selected.part_type,
-          quantity: confirmData.quantity, purchase_price: confirmData.price,
-          selling_price: confirmData.selling_price || 0,
-        })
+        msg = await saveInventory({ brand: selected.brand, model: selected.model, part_type: selected.part_type, quantity: confirmData.quantity, purchase_price: confirmData.price, selling_price: confirmData.selling_price || 0 })
       } else {
-        msg = await saveSale({
-          brand: selected.brand, model: selected.model, part_type: selected.part_type,
-          quantity: confirmData.quantity, selling_price: confirmData.price,
-          product_id: selected.id,
-        })
+        msg = await saveSale({ brand: selected.brand, model: selected.model, part_type: selected.part_type, quantity: confirmData.quantity, selling_price: confirmData.price, product_id: selected.id })
       }
       addMessage({ role: 'bot', text: msg })
     } catch {
@@ -709,7 +613,7 @@ export default function Chatbot() {
 
   const quickQueries = [
     { label: '📦 Stock', text: 'Konse products ka stock kam ya khatam hai?' },
-    { label: '💰 Aaj', text: 'Aaj ki total sale kitni hai?' },
+    { label: '💰 Aaj ki Sale', text: 'Aaj ki total sale kitni hai?' },
     { label: '🕌 Zakat', text: 'Meri zakat kitni banti hai?' },
     { label: '📊 Profit', text: 'Total profit kitna hai?' },
   ]
@@ -718,56 +622,40 @@ export default function Chatbot() {
 
   return (
     <>
-      <button onClick={() => setIsOpen(!isOpen)} style={{
-        position: 'fixed', bottom: '24px', right: '24px',
-        width: '56px', height: '56px', borderRadius: '50%',
-        backgroundColor: isOpen ? 'var(--accent-red)' : 'var(--accent-green)',
-        border: 'none', cursor: 'pointer', fontSize: '22px',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 1000, boxShadow: '0 4px 20px rgba(0,0,0,0.4)', transition: 'all 0.2s',
+      <button onClick={() => setIsOpen(o => !o)} style={{
+        position: 'fixed', bottom: '24px', right: '24px', width: '56px', height: '56px',
+        borderRadius: '50%', backgroundColor: isOpen ? 'var(--accent-red)' : 'var(--accent-green)',
+        border: 'none', cursor: 'pointer', fontSize: '22px', display: 'flex',
+        alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        boxShadow: '0 4px 20px rgba(0,0,0,0.4)', transition: 'all 0.2s',
       }}>
         {isOpen ? '✕' : '🤖'}
       </button>
 
       {isOpen && (
         <div style={{
-          position: 'fixed', bottom: '92px', right: '24px',
-          width: '400px', maxWidth: 'calc(100vw - 32px)',
-          height: '600px', maxHeight: 'calc(100vh - 120px)',
+          position: 'fixed', bottom: '92px', right: '24px', width: '400px',
+          maxWidth: 'calc(100vw - 32px)', height: '600px', maxHeight: 'calc(100vh - 120px)',
           backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)',
           borderRadius: '16px', display: 'flex', flexDirection: 'column',
           zIndex: 999, boxShadow: '0 8px 40px rgba(0,0,0,0.5)', overflow: 'hidden',
         }}>
 
           {/* Header */}
-          <div style={{
-            padding: '16px 20px', borderBottom: '1px solid var(--border)',
-            backgroundColor: 'var(--bg-secondary)', display: 'flex', alignItems: 'center', gap: '10px',
-          }}>
-            <div style={{
-              width: '32px', height: '32px', borderRadius: '50%',
-              backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px',
-            }}>🤖</div>
+          <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', backgroundColor: 'var(--bg-secondary)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px' }}>🤖</div>
             <div style={{ flex: 1 }}>
               <p style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>Noor Parts AI</p>
-              <p style={{ fontSize: '11px', fontFamily: 'IBM Plex Mono, monospace',
-                color: isListening ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+              <p style={{ fontSize: '11px', fontFamily: 'IBM Plex Mono, monospace', color: isListening ? 'var(--accent-red)' : 'var(--accent-green)' }}>
                 {isListening ? '🔴 Sun raha hun...' : loading ? 'Soch raha hun...' : 'Online • Live Data'}
               </p>
             </div>
           </div>
 
           {/* Messages */}
-          <div style={{
-            flex: 1, overflowY: 'auto', padding: '16px',
-            display: 'flex', flexDirection: 'column', gap: '12px',
-          }}>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {messages.map(msg => (
-              <div key={msg.id} style={{
-                display: 'flex', flexDirection: 'column',
-                alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
-              }}>
+              <div key={msg.id} style={{ display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
                 <div style={{
                   maxWidth: '88%', padding: '10px 14px',
                   borderRadius: msg.role === 'user' ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
@@ -775,37 +663,22 @@ export default function Chatbot() {
                   border: `1px solid ${msg.role === 'user' ? 'var(--accent-green)' : 'var(--border)'}`,
                   color: msg.role === 'user' ? 'var(--accent-green)' : 'var(--text-primary)',
                   fontSize: '13px', lineHeight: '1.6', whiteSpace: 'pre-wrap',
-                }}>
-                  {msg.text}
-                </div>
+                }}>{msg.text}</div>
 
-                {/* Invoice button — fixed: check invoice exists before calling */}
+                {/* Invoice button */}
                 {msg.invoice && (
-                  <button
-                    onClick={() => { if (msg.invoice) generateInvoicePDF(msg.invoice) }}
-                    style={{
-                      marginTop: '8px', padding: '8px 18px',
-                      backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)',
-                      borderRadius: '8px', color: 'var(--accent-blue)',
-                      fontSize: '12px', fontWeight: '600', cursor: 'pointer',
-                    }}>
-                    🖨 Invoice Open / PDF Download
-                  </button>
+                  <button onClick={() => { if (msg.invoice) generateInvoicePDF(msg.invoice) }} style={{
+                    marginTop: '8px', padding: '8px 18px',
+                    backgroundColor: 'var(--accent-blue-dim)', border: '1px solid var(--accent-blue)',
+                    borderRadius: '8px', color: 'var(--accent-blue)', fontSize: '12px', fontWeight: '600', cursor: 'pointer',
+                  }}>🖨 Invoice Open / PDF Download</button>
                 )}
 
-                {/* Confirm/Cancel */}
+                {/* Confirm / Cancel */}
                 {msg.action && pendingAction?.botMsgId === msg.id && msg.action.type !== 'confirm_product' && (
                   <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                    <button onClick={handleConfirm} style={{
-                      padding: '7px 16px', backgroundColor: 'var(--accent-green-dim)',
-                      border: '1px solid var(--accent-green)', borderRadius: '8px',
-                      color: 'var(--accent-green)', fontSize: '12px', fontWeight: '600', cursor: 'pointer',
-                    }}>✓ Confirm</button>
-                    <button onClick={handleCancel} style={{
-                      padding: '7px 16px', backgroundColor: 'transparent',
-                      border: '1px solid var(--border)', borderRadius: '8px',
-                      color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer',
-                    }}>Cancel</button>
+                    <button onClick={handleConfirm} style={{ padding: '7px 16px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>✓ Confirm</button>
+                    <button onClick={handleCancel} style={{ padding: '7px 16px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer' }}>Cancel</button>
                   </div>
                 )}
 
@@ -813,22 +686,13 @@ export default function Chatbot() {
                 {msg.action?.type === 'confirm_product' && pendingAction?.botMsgId === msg.id && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px', width: '88%' }}>
                     {(pendingAction.action.data as ConfirmData).products.map((p: ProductRow, i: number) => (
-                      <button key={p.id} onClick={() => handleProductSelection(i)} style={{
-                        padding: '8px 14px', backgroundColor: 'var(--bg-primary)',
-                        border: '1px solid var(--border)', borderRadius: '8px',
-                        color: 'var(--text-primary)', fontSize: '12px', cursor: 'pointer', textAlign: 'left',
-                      }}
+                      <button key={p.id} onClick={() => handleProductSelection(i)}
+                        style={{ padding: '8px 14px', backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '12px', cursor: 'pointer', textAlign: 'left' }}
                         onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent-green)'; e.currentTarget.style.color = 'var(--accent-green)' }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-primary)' }}
-                      >
-                        {i + 1}. {p.name} ({p.quantity} pcs)
-                      </button>
+                      >{i + 1}. {p.name} ({p.quantity} pcs)</button>
                     ))}
-                    <button onClick={handleCancel} style={{
-                      padding: '7px 14px', backgroundColor: 'transparent',
-                      border: '1px solid var(--border)', borderRadius: '8px',
-                      color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer',
-                    }}>Cancel</button>
+                    <button onClick={handleCancel} style={{ padding: '7px 14px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer' }}>Cancel</button>
                   </div>
                 )}
               </div>
@@ -836,17 +700,9 @@ export default function Chatbot() {
 
             {loading && (
               <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-                <div style={{
-                  padding: '10px 14px', borderRadius: '12px 12px 12px 4px',
-                  backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)',
-                  display: 'flex', gap: '4px', alignItems: 'center',
-                }}>
+                <div style={{ padding: '10px 14px', borderRadius: '12px 12px 12px 4px', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)', display: 'flex', gap: '4px', alignItems: 'center' }}>
                   {[0, 1, 2].map(i => (
-                    <div key={i} style={{
-                      width: '6px', height: '6px', borderRadius: '50%',
-                      backgroundColor: 'var(--accent-green)',
-                      animation: `bounce 1s infinite ${i * 0.2}s`,
-                    }} />
+                    <div key={i} style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--accent-green)', animation: `bounce 1s infinite ${i * 0.2}s` }} />
                   ))}
                 </div>
               </div>
@@ -858,53 +714,31 @@ export default function Chatbot() {
           {messages.length <= 1 && (
             <div style={{ padding: '0 12px 8px', display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
               {quickQueries.map(q => (
-                <button key={q.label} onClick={() => setInput(q.text)} style={{
-                  padding: '5px 10px', fontSize: '11px', cursor: 'pointer',
-                  backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)',
-                  borderRadius: '20px', color: 'var(--text-secondary)',
-                }}>{q.label}</button>
+                <button key={q.label} onClick={() => setInput(q.text)} style={{ padding: '5px 10px', fontSize: '11px', cursor: 'pointer', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: '20px', color: 'var(--text-secondary)' }}>{q.label}</button>
               ))}
             </div>
           )}
 
           {/* Input */}
-          <div style={{
-            padding: '12px 16px', borderTop: '1px solid var(--border)',
-            backgroundColor: 'var(--bg-secondary)', display: 'flex', gap: '8px', alignItems: 'center',
-          }}>
-            <button
-              onClick={isListening ? stopVoice : startVoice}
-              title="Voice input"
-              style={{
-                width: '40px', height: '40px', borderRadius: '8px', flexShrink: 0,
-                backgroundColor: isListening ? 'var(--accent-red-dim)' : 'var(--bg-primary)',
-                border: `1px solid ${isListening ? 'var(--accent-red)' : 'var(--border)'}`,
-                cursor: 'pointer', fontSize: '16px',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                animation: isListening ? 'pulse 1s infinite' : 'none',
-              }}
-            >
-              {isListening ? '⏹' : '🎤'}
-            </button>
+          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', backgroundColor: 'var(--bg-secondary)', display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button onClick={isListening ? stopVoice : startVoice} title="Voice input" style={{
+              width: '40px', height: '40px', borderRadius: '8px', flexShrink: 0,
+              backgroundColor: isListening ? 'var(--accent-red-dim)' : 'var(--bg-primary)',
+              border: `1px solid ${isListening ? 'var(--accent-red)' : 'var(--border)'}`,
+              cursor: 'pointer', fontSize: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>{isListening ? '⏹' : '🎤'}</button>
 
-            <input
-              type="text" value={input}
+            <input type="text" value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={isListening ? 'Sun raha hun...' : 'Type ya mic dabao...'}
               disabled={loading || isListening}
-              style={{
-                flex: 1, padding: '10px 14px',
-                backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border)',
-                borderRadius: '8px', color: 'var(--text-primary)',
-                fontSize: '13px', outline: 'none',
-                opacity: loading || isListening ? 0.6 : 1,
-              }}
+              style={{ flex: 1, padding: '10px 14px', backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '13px', outline: 'none', opacity: loading || isListening ? 0.6 : 1 }}
             />
+
             <button onClick={handleSend} disabled={loading || !input.trim() || isListening} style={{
-              padding: '10px 14px', backgroundColor: 'var(--accent-green-dim)',
-              border: '1px solid var(--accent-green)', borderRadius: '8px',
-              color: 'var(--accent-green)', fontSize: '16px',
+              padding: '10px 14px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)',
+              borderRadius: '8px', color: 'var(--accent-green)', fontSize: '16px',
               cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
               opacity: loading || !input.trim() ? 0.5 : 1,
             }}>↑</button>
@@ -913,14 +747,8 @@ export default function Chatbot() {
       )}
 
       <style>{`
-        @keyframes bounce {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-4px); }
-        }
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
+        @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
       `}</style>
     </>
   )
