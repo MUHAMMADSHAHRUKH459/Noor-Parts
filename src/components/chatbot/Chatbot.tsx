@@ -14,8 +14,8 @@ interface Message {
 }
 
 interface PendingAction {
-  type: 'inventory' | 'sale' | 'confirm_product'
-  data: InventoryData | SaleData | ConfirmData
+  type: 'inventory' | 'sale' | 'confirm_product' | 'delete_product' | 'delete_sale'
+  data: InventoryData | SaleData | ConfirmData | DeleteProductData | DeleteSaleData
 }
 
 interface InventoryData {
@@ -34,6 +34,19 @@ interface SaleData {
   quantity: number
   selling_price: number
   product_id?: string
+}
+
+interface DeleteProductData {
+  brand: string
+  model: string
+  part_type: string
+}
+
+interface DeleteSaleData {
+  brand: string
+  model: string
+  part_type: string
+  sale_id?: string
 }
 
 interface ConfirmData {
@@ -55,6 +68,16 @@ interface ProductRow {
   selling_price: number
 }
 
+interface SaleRow {
+  id: string
+  product_id: string
+  quantity: number
+  selling_price: number
+  total_amount: number
+  sold_at: string
+  product?: ProductRow
+}
+
 interface InvoiceData {
   product_name: string
   sales: InvoiceSale[]
@@ -70,7 +93,7 @@ interface InvoiceSale {
 }
 
 interface AIResult {
-  intent: 'inventory' | 'sale' | 'invoice' | 'query' | 'chat'
+  intent: 'inventory' | 'sale' | 'invoice' | 'query' | 'chat' | 'delete_product' | 'delete_sale'
   brand?: string
   model?: string
   part_type?: string
@@ -96,7 +119,7 @@ interface SpeechRecognitionInstance {
   stop: () => void
 }
 
-// ─── ID Counter (outside component — no re-render issues) ────────────────────
+// ─── ID Counter ───────────────────────────────────────────────────────────────
 
 let msgCounter = 0
 function nextId(): string {
@@ -128,9 +151,7 @@ async function fetchLiveContext(): Promise<string> {
     ])
     const pl = (products as ProductRow[]) || []
     const sl = (sales as {
-      total_amount?: number
-      quantity?: number
-      sold_at: string
+      total_amount?: number; quantity?: number; sold_at: string
       product?: { purchase_price?: number }
     }[]) || []
 
@@ -253,16 +274,74 @@ async function findMatchingProducts(partType: string, brand?: string, model?: st
   return (data as ProductRow[]) || []
 }
 
+async function findAnyProducts(brand?: string, model?: string, partType?: string): Promise<ProductRow[]> {
+  let query = supabase.from('products').select('*')
+  if (brand) query = query.ilike('brand', `%${brand}%`)
+  if (model) query = query.ilike('model', `%${model}%`)
+  if (partType) query = query.ilike('part_type', `%${partType}%`)
+  const { data } = await query
+  return (data as ProductRow[]) || []
+}
+
+// ─── Delete Actions ───────────────────────────────────────────────────────────
+
+async function deleteProduct(data: DeleteProductData): Promise<string> {
+  const products = await findAnyProducts(data.brand, data.model, data.part_type)
+  if (products.length === 0) return `✗ "${data.brand} ${data.model} ${data.part_type}" nahi mila inventory mein.`
+
+  const product = products[0]
+  // Also delete related sales first
+  await supabase.from('sales').delete().eq('product_id', product.id)
+  const { error } = await supabase.from('products').delete().eq('id', product.id)
+  if (error) throw error
+
+  return `✓ Delete ho gaya!\n📦 ${product.name}\nInventory aur us ki saari sales bhi hata di gayi hain.`
+}
+
+async function deleteLastSale(data: DeleteSaleData): Promise<string> {
+  // Find product first
+  const products = await findAnyProducts(data.brand, data.model, data.part_type)
+  if (products.length === 0) return `✗ Product nahi mila.`
+
+  const product = products[0]
+
+  // Get last sale of this product
+  const { data: sales } = await supabase.from('sales').select('*')
+    .eq('product_id', product.id)
+    .order('sold_at', { ascending: false })
+    .limit(1)
+
+  if (!sales || sales.length === 0) return `✗ ${product.name} ki koi sale record nahi mili.`
+
+  const lastSale = sales[0] as SaleRow
+
+  // Restore stock
+  const { data: prod } = await supabase.from('products').select('quantity').eq('id', product.id).single()
+  if (prod) {
+    await supabase.from('products')
+      .update({ quantity: (prod as { quantity: number }).quantity + lastSale.quantity })
+      .eq('id', product.id)
+  }
+
+  // Delete sale
+  const { error } = await supabase.from('sales').delete().eq('id', lastSale.id)
+  if (error) throw error
+
+  return `✓ Last sale delete ho gayi!\n📦 ${product.name}\n🔢 ${lastSale.quantity} pcs — Rs.${lastSale.total_amount?.toLocaleString()}\n📦 Stock wapas aa gaya.`
+}
+
 // ─── System Prompt ────────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are an AI assistant for a Pakistani mobile parts shop "Noor Parts".
-Shopkeepers talk casually in Roman Urdu or English. Understand their casual language and respond helpfully.
+Shopkeepers talk casually in Roman Urdu or English. Understand casual language and respond helpfully.
 
 CASUAL PATTERNS:
-- "100 back cover 500 mein liye" = inventory intent
-- "50 hot 10 ka back cover 800 mein sale kiye" = sale intent  
-- "hot 10 back cover ki invoice" = invoice intent
-- "total profit kitna hai" = query intent
+- "100 back cover 500 mein liye" = inventory
+- "50 hot 10 ka back cover 800 mein sale kiye" = sale
+- "hot 10 back cover delete karo / hata do / remove karo" = delete_product
+- "hot 10 back cover ki last sale delete karo / sale wapas karo" = delete_sale
+- "hot 10 back cover ki invoice" = invoice
+- "total profit kitna hai" = query
 
 Part type mappings:
 - back cover/back glass/peeche ka cover = Back Glass
@@ -277,20 +356,23 @@ Part type mappings:
 - ribbon/flex = Ribbon
 - sim tray/sim slot = Sim Tray
 
-IMPORTANT: You MUST respond ONLY with a JSON object. No text before or after JSON. No markdown. No explanation.
+IMPORTANT: Respond ONLY with valid JSON. No text before or after. No markdown.
 
-For inventory: {"intent":"inventory","brand":"","model":"","part_type":"","quantity":0,"purchase_price":0,"selling_price":0,"message":"Roman Urdu confirmation"}
-For sale: {"intent":"sale","brand":"","model":"","part_type":"","quantity":0,"selling_price":0,"message":"Roman Urdu confirmation"}
-For invoice: {"intent":"invoice","brand":"","model":"","part_type":"","message":"Invoice bana raha hun..."}
-For stock/profit/zakat/analytics questions: {"intent":"query","message":"Detailed Roman Urdu answer using the live data provided"}
-For general chat: {"intent":"chat","message":"Roman Urdu response"}
+inventory: {"intent":"inventory","brand":"","model":"","part_type":"","quantity":0,"purchase_price":0,"selling_price":0,"message":"Roman Urdu"}
+sale: {"intent":"sale","brand":"","model":"","part_type":"","quantity":0,"selling_price":0,"message":"Roman Urdu"}
+delete_product: {"intent":"delete_product","brand":"","model":"","part_type":"","message":"Roman Urdu — confirm karna hai"}
+delete_sale: {"intent":"delete_sale","brand":"","model":"","part_type":"","message":"Roman Urdu — last sale delete hogi"}
+invoice: {"intent":"invoice","brand":"","model":"","part_type":"","message":"Roman Urdu"}
+query: {"intent":"query","message":"Detailed Roman Urdu answer using live data"}
+chat: {"intent":"chat","message":"Roman Urdu"}
 
 Rules:
-- brand/model can be empty string "" if not mentioned
-- part_type MUST be mapped to standard name from the list above
-- quantity and prices must be numbers not strings
-- message is ALWAYS in Roman Urdu
-- For query intent: use ALL the live data provided to give accurate detailed answer`
+- brand/model can be "" if not mentioned
+- part_type MUST be mapped to standard name
+- quantity and prices must be numbers
+- message always in Roman Urdu
+- delete_product: product aur us ki saari sales delete hongi — message mein warn karo
+- delete_sale: sirf last sale delete hogi, stock wapas aayega`
 
 // ─── Call AI ──────────────────────────────────────────────────────────────────
 
@@ -304,8 +386,7 @@ async function callAI(userMessage: string, history: Message[]): Promise<AIResult
 ${liveData ? `\nLIVE DATA:\n${liveData}\n` : ''}
 ${historyText ? `HISTORY:\n${historyText}\n` : ''}
 User says: "${userMessage}"
-
-Respond with JSON only:`
+JSON:`
 
   const response = await fetch('/api/chat', {
     method: 'POST',
@@ -317,15 +398,12 @@ Respond with JSON only:`
   const data = await response.json()
   const text = (data.choices?.[0]?.message?.content as string) || '{}'
   const clean = text.replace(/```json|```/g, '').trim()
-
-  // Extract JSON if there's text around it
   const jsonMatch = clean.match(/\{[\s\S]*\}/)
-  if (!jsonMatch) throw new Error('Invalid JSON response')
-
+  if (!jsonMatch) throw new Error('Invalid JSON')
   return JSON.parse(jsonMatch[0]) as AIResult
 }
 
-// ─── Supabase Actions ─────────────────────────────────────────────────────────
+// ─── Supabase: Save Inventory ─────────────────────────────────────────────────
 
 async function saveInventory(data: InventoryData): Promise<string> {
   const productName = `${data.brand} ${data.model} ${data.part_type}`.trim()
@@ -351,6 +429,8 @@ async function saveInventory(data: InventoryData): Promise<string> {
     return `✓ Naya product add!\n📦 ${productName}\n🔢 ${data.quantity} pcs @ Rs.${data.purchase_price}`
   }
 }
+
+// ─── Supabase: Save Sale ──────────────────────────────────────────────────────
 
 async function saveSale(data: SaleData): Promise<string> {
   let product: ProductRow | null = null
@@ -380,7 +460,6 @@ async function saveSale(data: SaleData): Promise<string> {
     selling_price: data.selling_price, total_amount,
   }])
   if (saleErr) throw saleErr
-
   await supabase.from('products').update({ quantity: product.quantity - data.quantity }).eq('id', product.id)
   return `✓ Sale record ho gaya!\n📦 ${product.name}\n🔢 ${data.quantity} pcs @ Rs.${data.selling_price}\n💰 Total: Rs.${total_amount.toLocaleString()}`
 }
@@ -390,7 +469,7 @@ async function saveSale(data: SaleData): Promise<string> {
 const INITIAL_MESSAGES: Message[] = [{
   id: 'msg_0',
   role: 'bot',
-  text: 'Assalam o Alaikum! Main Noor Parts ka AI assistant hun. 🤖\n\nAap mujhse aise baat kar sakte hain:\n\n📦 "100 back cover 500 mein liye"\n💸 "50 hot 10 ka back cover 800 mein sale kiye"\n🧾 "Hot 10 back cover ki invoice banao"\n📊 "Total profit kitna hai?"\n🕌 "Zakat kitni banti hai?"',
+  text: 'Assalam o Alaikum! Main Noor Parts ka AI assistant hun. 🤖\n\nAap mujhse aise baat kar sakte hain:\n\n📦 "100 back cover 500 mein liye"\n💸 "50 hot 10 ka back cover 800 mein sale kiye"\n🗑 "Hot 10 back cover delete karo"\n🗑 "Hot 10 back cover ki last sale delete karo"\n🧾 "Hot 10 back cover ki invoice banao"\n📊 "Total profit kitna hai?"\n🕌 "Zakat kitni banti hai?"',
 }]
 
 export default function Chatbot() {
@@ -408,8 +487,6 @@ export default function Chatbot() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
-
-  // ── addMessage — uses counter, no impure functions ────────────────────────
 
   const addMessage = useCallback((msg: Omit<Message, 'id'>): string => {
     const id = nextId()
@@ -448,24 +525,30 @@ export default function Chatbot() {
     setIsListening(false)
   }
 
-  // ── Core send logic ───────────────────────────────────────────────────────
+  // ── Send ──────────────────────────────────────────────────────────────────
+
+  async function handleSend() {
+    const text = input.trim()
+    if (!text) return
+    setInput('')
+    await handleSendText(text)
+  }
 
   async function handleSendText(text: string) {
     if (!text.trim() || loading || sendingRef.current) return
     sendingRef.current = true
     setLoading(true)
-    setInput('')
-
     addMessage({ role: 'user', text })
 
     try {
       const result = await callAI(text, messages)
 
+      // ── Invoice ──
       if (result.intent === 'invoice') {
         addMessage({ role: 'bot', text: result.message || 'Invoice bana raha hun...' })
         const invoiceData = await fetchInvoiceData(result.brand || '', result.model || '', result.part_type || '')
         if (!invoiceData) {
-          addMessage({ role: 'bot', text: '✗ Is product ki koi sale nahi mili database mein.' })
+          addMessage({ role: 'bot', text: '✗ Is product ki koi sale nahi mili.' })
         } else {
           addMessage({
             role: 'bot',
@@ -474,6 +557,33 @@ export default function Chatbot() {
           })
         }
 
+      // ── Delete Product ──
+      } else if (result.intent === 'delete_product') {
+        const action: PendingAction = {
+          type: 'delete_product',
+          data: { brand: result.brand || '', model: result.model || '', part_type: result.part_type || '' } as DeleteProductData,
+        }
+        const msgId = addMessage({
+          role: 'bot',
+          text: `${result.message}\n\n⚠ Confirm karein? Yeh product aur us ki saari sales hamesha ke liye delete ho jayengi.`,
+          action,
+        })
+        setPendingAction({ action, botMsgId: msgId })
+
+      // ── Delete Sale ──
+      } else if (result.intent === 'delete_sale') {
+        const action: PendingAction = {
+          type: 'delete_sale',
+          data: { brand: result.brand || '', model: result.model || '', part_type: result.part_type || '' } as DeleteSaleData,
+        }
+        const msgId = addMessage({
+          role: 'bot',
+          text: `${result.message}\n\nConfirm karein? Last sale delete hogi aur stock wapas aa jayega.`,
+          action,
+        })
+        setPendingAction({ action, botMsgId: msgId })
+
+      // ── Inventory ──
       } else if (result.intent === 'inventory') {
         const hasBrandModel = result.brand && result.model
         if (!hasBrandModel && result.part_type) {
@@ -510,6 +620,7 @@ export default function Chatbot() {
           setPendingAction({ action, botMsgId: msgId })
         }
 
+      // ── Sale ──
       } else if (result.intent === 'sale') {
         const hasBrandModel = result.brand && result.model
         if (!hasBrandModel && result.part_type) {
@@ -542,7 +653,6 @@ export default function Chatbot() {
         }
 
       } else {
-        // query or chat — just show message
         addMessage({ role: 'bot', text: result.message })
       }
 
@@ -555,13 +665,7 @@ export default function Chatbot() {
     }
   }
 
-  async function handleSend() {
-    const text = input.trim()
-    if (!text) return
-    await handleSendText(text)
-  }
-
-  // ── Confirm / Cancel ──────────────────────────────────────────────────────
+  // ── Confirm ───────────────────────────────────────────────────────────────
 
   async function handleConfirm() {
     if (!pendingAction) return
@@ -572,9 +676,11 @@ export default function Chatbot() {
       let msg = ''
       if (action.type === 'inventory') msg = await saveInventory(action.data as InventoryData)
       else if (action.type === 'sale') msg = await saveSale(action.data as SaleData)
+      else if (action.type === 'delete_product') msg = await deleteProduct(action.data as DeleteProductData)
+      else if (action.type === 'delete_sale') msg = await deleteLastSale(action.data as DeleteSaleData)
       addMessage({ role: 'bot', text: msg })
     } catch {
-      addMessage({ role: 'bot', text: 'Save karne mein error. Dobara try karein.' })
+      addMessage({ role: 'bot', text: 'Error aa gayi. Dobara try karein.' })
     } finally {
       setLoading(false)
     }
@@ -674,10 +780,22 @@ export default function Chatbot() {
                   }}>🖨 Invoice Open / PDF Download</button>
                 )}
 
-                {/* Confirm / Cancel */}
+                {/* Confirm / Cancel — for inventory, sale, delete */}
                 {msg.action && pendingAction?.botMsgId === msg.id && msg.action.type !== 'confirm_product' && (
                   <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                    <button onClick={handleConfirm} style={{ padding: '7px 16px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)', borderRadius: '8px', color: 'var(--accent-green)', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>✓ Confirm</button>
+                    <button onClick={handleConfirm} style={{
+                      padding: '7px 16px',
+                      backgroundColor: msg.action.type === 'delete_product' || msg.action.type === 'delete_sale'
+                        ? 'var(--accent-red-dim)' : 'var(--accent-green-dim)',
+                      border: `1px solid ${msg.action.type === 'delete_product' || msg.action.type === 'delete_sale'
+                        ? 'var(--accent-red)' : 'var(--accent-green)'}`,
+                      borderRadius: '8px',
+                      color: msg.action.type === 'delete_product' || msg.action.type === 'delete_sale'
+                        ? 'var(--accent-red)' : 'var(--accent-green)',
+                      fontSize: '12px', fontWeight: '600', cursor: 'pointer',
+                    }}>
+                      {msg.action.type === 'delete_product' || msg.action.type === 'delete_sale' ? '🗑 Delete Karo' : '✓ Confirm'}
+                    </button>
                     <button onClick={handleCancel} style={{ padding: '7px 16px', backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer' }}>Cancel</button>
                   </div>
                 )}
@@ -735,7 +853,6 @@ export default function Chatbot() {
               disabled={loading || isListening}
               style={{ flex: 1, padding: '10px 14px', backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '13px', outline: 'none', opacity: loading || isListening ? 0.6 : 1 }}
             />
-
             <button onClick={handleSend} disabled={loading || !input.trim() || isListening} style={{
               padding: '10px 14px', backgroundColor: 'var(--accent-green-dim)', border: '1px solid var(--accent-green)',
               borderRadius: '8px', color: 'var(--accent-green)', fontSize: '16px',
